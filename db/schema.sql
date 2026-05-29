@@ -86,15 +86,21 @@ CREATE TABLE IF NOT EXISTS marks (
     rel_y           NUMERIC(6,5) NOT NULL,               -- 0..1 of image height
     tool            TEXT NOT NULL DEFAULT 'cross',       -- cross|circle|dot|arrow|star|square
     color           TEXT NOT NULL DEFAULT '#c0392b',
+    size            NUMERIC(4,2) NOT NULL DEFAULT 1.0,   -- visual scale multiplier (0.5..2.0)
     room            TEXT,                                -- R-1..R-10
     treatment       TEXT,                                -- label (e.g. SLT, IMS)
     effectiveness   TEXT,                                -- 1Q..5Q
     note            TEXT,
+    client_id       TEXT,                                -- stable client-generated id (survives save/reorder)
+    connected_to_cid TEXT,                               -- client_id of the previous mark in a same-treatment chain
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Idempotent: add doctor_id to legacy installs that pre-date this column.
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS doctor_id INT REFERENCES doctors(id) ON DELETE SET NULL;
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS size NUMERIC(4,2) NOT NULL DEFAULT 1.0;
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS client_id TEXT;
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS connected_to_cid TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_marks_session ON marks(session_id, order_num);
 CREATE INDEX IF NOT EXISTS idx_marks_doctor  ON marks(doctor_id);

@@ -91,7 +91,9 @@ router.get('/sessions/:id/marks', async (req, res) => {
     const { rows } = await query(
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
-              m.tool, m.color, m.room, m.treatment, m.effectiveness, m.note, m.created_at,
+              m.tool, m.color, m.size::float AS size,
+              m.room, m.treatment, m.effectiveness, m.note,
+              m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
          LEFT JOIN doctors d ON d.id = m.doctor_id
@@ -145,8 +147,9 @@ router.put('/sessions/:id/marks', async (req, res) => {
         await c.query(
           `INSERT INTO marks
              (session_id, body_image_id, doctor_id, order_num, rel_x, rel_y,
-              tool, color, room, treatment, effectiveness, note)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+              tool, color, size, room, treatment, effectiveness, note,
+              client_id, connected_to_cid)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
           [
             id,
             body_image_id || null,
@@ -155,10 +158,13 @@ router.put('/sessions/:id/marks', async (req, res) => {
             clamp01(m.rel_x), clamp01(m.rel_y),
             m.tool || 'cross',
             m.color || '#c0392b',
+            clampSize(m.size),
             m.room || null,
             m.treatment || m.label || null,
             m.effectiveness || m.eff || null,
             m.note || null,
+            m.client_id || null,
+            m.connected_to_cid || null,
           ]
         );
       }
@@ -177,7 +183,8 @@ router.put('/sessions/:id/marks', async (req, res) => {
       const { rows } = await c.query(
         `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
                 m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
-                m.tool, m.color, m.room, m.treatment, m.effectiveness, m.note, m.created_at,
+                m.tool, m.color, m.size::float AS size,
+                m.room, m.treatment, m.effectiveness, m.note, m.created_at,
                 d.full_name AS doctor_name, d.color AS doctor_color
            FROM marks m
            LEFT JOIN doctors d ON d.id = m.doctor_id
@@ -215,7 +222,9 @@ router.get('/patients/:patientId/all', async (req, res) => {
     const { rows: marks } = await query(
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
-              m.tool, m.color, m.room, m.treatment, m.effectiveness, m.note, m.created_at,
+              m.tool, m.color, m.size::float AS size,
+              m.room, m.treatment, m.effectiveness, m.note,
+              m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
          LEFT JOIN doctors d ON d.id = m.doctor_id
@@ -236,6 +245,12 @@ function clamp01(v) {
   const n = Number(v);
   if (!isFinite(n)) return 0;
   return Math.max(0, Math.min(1, n));
+}
+
+function clampSize(v) {
+  const n = Number(v);
+  if (!isFinite(n) || n <= 0) return 1.0;
+  return Math.max(0.3, Math.min(3.0, n));
 }
 
 module.exports = router;
