@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS body_images (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_body_images_one_active
     ON body_images(is_active) WHERE is_active = TRUE;
 
+-- A binary mask PNG (white = blank-region, transparent = body) painted by the
+-- admin with the wand + lasso editor. Used to relocate edge-mark callouts
+-- so they sit in the empty space around the silhouette instead of on top of it.
+ALTER TABLE body_images ADD COLUMN IF NOT EXISTS blank_mask_filename TEXT;
+
 -- ── Treatment Sessions (per patient, per date) ─────────────
 CREATE TABLE IF NOT EXISTS treatment_sessions (
     id              SERIAL PRIMARY KEY,
