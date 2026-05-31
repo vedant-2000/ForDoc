@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS marks (
     room            TEXT,                                -- R-1..R-10
     treatment       TEXT,                                -- label (e.g. SLT, IMS)
     effectiveness   TEXT,                                -- 1Q..5Q
+    sitting_position TEXT,                               -- e.g. Sitting / Standing / Prone
     note            TEXT,
     client_id       TEXT,                                -- stable client-generated id (survives save/reorder)
     connected_to_cid TEXT,                               -- client_id of the previous mark in a same-treatment chain
@@ -101,6 +102,7 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS doctor_id INT REFERENCES doctors(id) 
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS size NUMERIC(4,2) NOT NULL DEFAULT 1.0;
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS client_id TEXT;
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS connected_to_cid TEXT;
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS sitting_position TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_marks_session ON marks(session_id, order_num);
 CREATE INDEX IF NOT EXISTS idx_marks_doctor  ON marks(doctor_id);
@@ -130,6 +132,17 @@ CREATE TABLE IF NOT EXISTS treatment_catalog (
 );
 CREATE INDEX IF NOT EXISTS idx_treatment_catalog_room
     ON treatment_catalog(room, sort_order);
+
+-- ── Sitting-position catalog (single global list) ─────────
+CREATE TABLE IF NOT EXISTS sitting_positions (
+    id          SERIAL PRIMARY KEY,
+    position    TEXT UNIQUE NOT NULL,
+    sort_order  INT  NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sitting_positions_order
+    ON sitting_positions(sort_order);
 
 -- ── Treatment reports saved (for audit / re-share) ─────────
 CREATE TABLE IF NOT EXISTS treatment_reports (

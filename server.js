@@ -43,7 +43,10 @@ if (distDir) {
   app.use(express.static(distDir, {
     maxAge: '1d',
     setHeaders: (res, filePath) => {
-      if (filePath.endsWith('index.html')) {
+      const base = path.basename(filePath);
+      // index.html, the service worker, and the manifest must never be
+      // cached long-term: they're how new asset hashes / PWA updates land.
+      if (base === 'index.html' || base === 'sw.js' || base === 'manifest.webmanifest') {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');

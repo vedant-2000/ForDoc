@@ -128,4 +128,63 @@ router.post('/treatments', authRequired(['admin']), async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Sitting positions (single global list)
+// ─────────────────────────────────────────────────────────────
+
+// GET /api/catalog/sitting-positions → ['Sitting','Standing',...]
+router.get('/sitting-positions', authRequired(), async (_req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT position FROM sitting_positions
+        WHERE is_active = TRUE
+        ORDER BY sort_order, position`
+    );
+    res.json(rows.map(r => r.position));
+  } catch (e) {
+    console.error('[catalog/sitting-positions GET]', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PUT /api/catalog/sitting-positions   body: { positions: ['Sitting','Standing',...] }
+// Admin: replace ALL sitting positions (preserving order from the array).
+router.put('/sitting-positions', authRequired(['admin']), async (req, res) => {
+  const list = Array.isArray(req.body?.positions) ? req.body.positions : null;
+  if (!list) return res.status(400).json({ error: 'positions must be an array' });
+
+  const clean = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const p = String(raw || '').trim();
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push(p);
+  }
+
+  try {
+    const rows = await tx(async (c) => {
+      await c.query('DELETE FROM sitting_positions');
+      for (let i = 0; i < clean.length; i++) {
+        await c.query(
+          `INSERT INTO sitting_positions (position, sort_order) VALUES ($1, $2)`,
+          [clean[i], i]
+        );
+      }
+      const { rows: r } = await c.query(
+        `SELECT position FROM sitting_positions
+          WHERE is_active = TRUE
+          ORDER BY sort_order`
+      );
+      return r;
+    });
+    res.json({ positions: rows.map(r => r.position) });
+  } catch (e) {
+    console.error('[catalog/sitting-positions PUT]', e);
+    res.status(500).json({ error: 'Save failed' });
+  }
+});
+
 module.exports = router;
