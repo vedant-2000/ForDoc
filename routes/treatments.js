@@ -185,7 +185,8 @@ router.put('/sessions/:id/marks', async (req, res) => {
         `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
                 m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
                 m.tool, m.color, m.size::float AS size,
-                m.room, m.treatment, m.effectiveness, m.sitting_position, m.note, m.created_at,
+                m.room, m.treatment, m.effectiveness, m.sitting_position, m.note,
+                m.client_id, m.connected_to_cid, m.created_at,
                 d.full_name AS doctor_name, d.color AS doctor_color
            FROM marks m
            LEFT JOIN doctors d ON d.id = m.doctor_id

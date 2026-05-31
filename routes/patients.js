@@ -11,19 +11,33 @@ router.use(authRequired());
 router.get('/', async (req, res) => {
   const q = (req.query.q || '').trim();
   try {
+    // last_session = most recent treatment_sessions.session_date for the
+    // patient; falls back to the patient's own updated_at when no session
+    // exists. Used by the patient list UI's "Last updated" column.
     let rows;
     if (q) {
       ({ rows } = await query(
-        `SELECT id, patient_code, full_name, phone, created_at, updated_at
-         FROM patients
-         WHERE patient_code ILIKE $1 OR full_name ILIKE $1
-         ORDER BY updated_at DESC LIMIT 200`,
+        `SELECT p.id, p.patient_code, p.full_name, p.phone,
+                p.created_at, p.updated_at,
+                MAX(s.session_date) AS last_session
+         FROM patients p
+         LEFT JOIN treatment_sessions s ON s.patient_id = p.id
+         WHERE p.patient_code ILIKE $1 OR p.full_name ILIKE $1
+         GROUP BY p.id
+         ORDER BY COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
+         LIMIT 200`,
         [`%${q}%`]
       ));
     } else {
       ({ rows } = await query(
-        `SELECT id, patient_code, full_name, phone, created_at, updated_at
-         FROM patients ORDER BY updated_at DESC LIMIT 200`
+        `SELECT p.id, p.patient_code, p.full_name, p.phone,
+                p.created_at, p.updated_at,
+                MAX(s.session_date) AS last_session
+         FROM patients p
+         LEFT JOIN treatment_sessions s ON s.patient_id = p.id
+         GROUP BY p.id
+         ORDER BY COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
+         LIMIT 200`
       ));
     }
     res.json(rows);
