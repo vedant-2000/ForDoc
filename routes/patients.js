@@ -8,6 +8,8 @@ const router = express.Router();
 router.use(authRequired());
 
 // GET /api/patients?q=
+// Soft-deleted patients are INCLUDED in the response (with deleted_at set) so
+// the UI can show a deleted indicator. Active rows sort first, then deleted.
 router.get('/', async (req, res) => {
   const q = (req.query.q || '').trim();
   try {
@@ -18,25 +20,27 @@ router.get('/', async (req, res) => {
     if (q) {
       ({ rows } = await query(
         `SELECT p.id, p.patient_code, p.full_name, p.phone,
-                p.created_at, p.updated_at,
+                p.created_at, p.updated_at, p.deleted_at,
                 MAX(s.session_date) AS last_session
          FROM patients p
          LEFT JOIN treatment_sessions s ON s.patient_id = p.id
          WHERE p.patient_code ILIKE $1 OR p.full_name ILIKE $1
          GROUP BY p.id
-         ORDER BY COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
+         ORDER BY (p.deleted_at IS NULL) DESC,
+                  COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
          LIMIT 200`,
         [`%${q}%`]
       ));
     } else {
       ({ rows } = await query(
         `SELECT p.id, p.patient_code, p.full_name, p.phone,
-                p.created_at, p.updated_at,
+                p.created_at, p.updated_at, p.deleted_at,
                 MAX(s.session_date) AS last_session
          FROM patients p
          LEFT JOIN treatment_sessions s ON s.patient_id = p.id
          GROUP BY p.id
-         ORDER BY COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
+         ORDER BY (p.deleted_at IS NULL) DESC,
+                  COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
          LIMIT 200`
       ));
     }
@@ -111,14 +115,25 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/patients/:id  (admin only)
+// DELETE /api/patients/:id  (admin only) — SOFT delete.
+// Sets deleted_at = NOW(). The patient + all their sessions/marks/reports stay
+// in the DB; the partial unique index on patient_code allows a new patient to
+// be created later with the same code/name. Idempotent: re-deleting a row
+// keeps its original deleted_at.
 router.delete('/:id', async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const id = +req.params.id;
   try {
-    const r = await query('DELETE FROM patients WHERE id=$1', [id]);
+    const r = await query(
+      `UPDATE patients
+          SET deleted_at = COALESCE(deleted_at, NOW()),
+              updated_at = NOW()
+        WHERE id=$1
+      RETURNING id, deleted_at`,
+      [id]
+    );
     if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
-    res.json({ ok: true });
+    res.json({ ok: true, deleted_at: r.rows[0].deleted_at });
   } catch (e) {
     res.status(500).json({ error: 'Delete failed' });
   }

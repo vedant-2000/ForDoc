@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS patients (
 CREATE INDEX IF NOT EXISTS idx_patients_code ON patients(patient_code);
 CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(full_name);
 
+-- Soft-delete support: deleted_at marks the row as removed but preserves all
+-- history (sessions, marks, etc. cascade off patients.id). The UNIQUE
+-- constraint on patient_code is replaced with a partial index so the same
+-- code/name can be re-used for a new patient after a soft-delete.
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE patients DROP CONSTRAINT IF EXISTS patients_patient_code_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_patients_code_active
+    ON patients (patient_code) WHERE deleted_at IS NULL;
+
 -- ── Body Images (versioned — admin uploads) ────────────────
 -- Coordinates of marks are stored as relative percentages (0..1)
 -- of the image's natural width/height, so when the admin uploads
