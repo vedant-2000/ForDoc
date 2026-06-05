@@ -63,6 +63,24 @@ router.get('/active', async (_req, res) => {
   }
 });
 
+// PUBLIC: GET /api/images/:id  -> any (historic) image by id, so old sessions
+// render on the body image they were originally drawn on, not on the latest upload.
+router.get('/:id(\\d+)', async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      `SELECT id, filename, original_name, mime_type, width_px, height_px,
+              is_active, blank_mask_filename, created_at
+       FROM body_images WHERE id = $1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(withUrls(rows[0]));
+  } catch (e) {
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
 // GET /api/images   (admin) — list all uploads
 router.get('/', authRequired(['admin']), async (_req, res) => {
   const { rows } = await query(
@@ -134,6 +152,25 @@ router.delete('/:id/mask', authRequired(['admin']), async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'Mask clear failed' });
+  }
+});
+
+// GET /api/images/:id/usage  (admin) — how many marks / sessions reference this image.
+// Used by the admin UI to show a real warning before deletion, since deleting
+// the image row nulls each mark's body_image_id (ON DELETE SET NULL) and those
+// sessions will then render against whatever image is currently active.
+router.get('/:id(\\d+)/usage', authRequired(['admin']), async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int                          AS mark_count,
+              COUNT(DISTINCT session_id)::int        AS session_count
+         FROM marks WHERE body_image_id = $1`,
+      [id]
+    );
+    res.json(rows[0] || { mark_count: 0, session_count: 0 });
+  } catch (e) {
+    res.status(500).json({ error: 'Usage lookup failed' });
   }
 });
 
