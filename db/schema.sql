@@ -117,6 +117,10 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS size NUMERIC(4,2) NOT NULL DEFAULT 1.
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS client_id TEXT;
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS connected_to_cid TEXT;
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS sitting_position TEXT;
+-- Multi-room support: new marks store the set of rooms selected once at the
+-- top of the marker page in this array. Legacy marks keep their single `room`
+-- TEXT value populated; `room_ids` stays NULL for them.
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS room_ids TEXT[];
 
 CREATE INDEX IF NOT EXISTS idx_marks_session ON marks(session_id, order_num);
 CREATE INDEX IF NOT EXISTS idx_marks_doctor  ON marks(doctor_id);

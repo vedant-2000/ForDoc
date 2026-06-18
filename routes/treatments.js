@@ -92,7 +92,7 @@ router.get('/sessions/:id/marks', async (req, res) => {
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
-              m.room, m.treatment, m.effectiveness, m.sitting_position, m.note,
+              m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
@@ -147,9 +147,9 @@ router.put('/sessions/:id/marks', async (req, res) => {
         await c.query(
           `INSERT INTO marks
              (session_id, body_image_id, doctor_id, order_num, rel_x, rel_y,
-              tool, color, size, room, treatment, effectiveness, sitting_position, note,
+              tool, color, size, room, room_ids, treatment, effectiveness, sitting_position, note,
               client_id, connected_to_cid)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
           [
             id,
             body_image_id || null,
@@ -160,6 +160,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
             m.color || '#c0392b',
             clampSize(m.size),
             m.room || null,
+            cleanRoomIds(m.room_ids),
             m.treatment || m.label || null,
             m.effectiveness || m.eff || null,
             m.sitting_position || null,
@@ -225,7 +226,7 @@ router.get('/patients/:patientId/all', async (req, res) => {
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
-              m.room, m.treatment, m.effectiveness, m.sitting_position, m.note,
+              m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
@@ -253,6 +254,15 @@ function clampSize(v) {
   const n = Number(v);
   if (!isFinite(n) || n <= 0) return 1.0;
   return Math.max(0.3, Math.min(3.0, n));
+}
+
+// Accept an array of room ids from the client, drop blanks/dupes, return null
+// (not []) when empty so the DB stores NULL — matches the "legacy single room"
+// rows and keeps the column semantics tidy.
+function cleanRoomIds(v) {
+  if (!Array.isArray(v)) return null;
+  const out = [...new Set(v.map(s => (s == null ? '' : String(s).trim())).filter(Boolean))];
+  return out.length ? out : null;
 }
 
 module.exports = router;
