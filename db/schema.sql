@@ -89,6 +89,15 @@ CREATE TABLE IF NOT EXISTS treatment_sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_patient_date
     ON treatment_sessions(patient_id, session_date DESC);
 
+-- Cumulative clinical measurements collected once per session (per patient,
+-- per date) — NOT per mark. Captured in the marker page's session bar.
+--   pct_bt → % Before Treatment
+--   pct_at → % After Treatment
+--   ss     → SS (severity score)
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_bt NUMERIC(6,2);
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_at NUMERIC(6,2);
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
+
 -- ── Marks (each placed point on the body diagram) ──────────
 CREATE TABLE IF NOT EXISTS marks (
     id              SERIAL PRIMARY KEY,
@@ -121,6 +130,19 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS sitting_position TEXT;
 -- top of the marker page in this array. Legacy marks keep their single `room`
 -- TEXT value populated; `room_ids` stays NULL for them.
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS room_ids TEXT[];
+-- Clinical measurements collected per treatment.
+--   pct_bt → % Before Treatment
+--   pct_at → % After Treatment
+--   ss     → SS (severity score)
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS pct_bt NUMERIC(6,2);
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS pct_at NUMERIC(6,2);
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
+
+-- Patient/date uniqueness is enforced at the session level
+-- (treatment_sessions has UNIQUE (patient_id, session_date)). The same
+-- treatment may legitimately be applied to multiple body regions within one
+-- visit, so we do NOT constrain (session_id, treatment) here.
+DROP INDEX IF EXISTS uq_marks_session_treatment;
 
 CREATE INDEX IF NOT EXISTS idx_marks_session ON marks(session_id, order_num);
 CREATE INDEX IF NOT EXISTS idx_marks_doctor  ON marks(doctor_id);
@@ -137,11 +159,29 @@ CREATE TABLE IF NOT EXISTS drive_tokens (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Rooms (editable list of treatment rooms) ──────────────
+-- Treatments and marks reference a room by its NAME. Renames cascade through
+-- the rooms PUT route so historical denormalised references stay in sync.
+CREATE TABLE IF NOT EXISTS rooms (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    sort_order  INT  NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rooms_order ON rooms(sort_order, name);
+
+-- Seed rooms 1..10 on a fresh install (idempotent — won't duplicate if rerun).
+INSERT INTO rooms (name, sort_order)
+SELECT n::TEXT, n
+FROM   generate_series(1, 10) n
+ON CONFLICT (name) DO NOTHING;
+
 -- ── Treatment catalog (room → allowed treatments) ─────────
 -- Editable by admin via the dashboard; the marker UI fetches from here.
 CREATE TABLE IF NOT EXISTS treatment_catalog (
     id          SERIAL PRIMARY KEY,
-    room        TEXT NOT NULL,                       -- 'R-1', 'R-2', ...
+    room        TEXT NOT NULL,                       -- references rooms.name (no FK; cascaded by app)
     treatment   TEXT NOT NULL,                       -- 'SLT', 'IMS', ...
     sort_order  INT  NOT NULL DEFAULT 0,
     is_active   BOOLEAN NOT NULL DEFAULT TRUE,
@@ -150,6 +190,64 @@ CREATE TABLE IF NOT EXISTS treatment_catalog (
 );
 CREATE INDEX IF NOT EXISTS idx_treatment_catalog_room
     ON treatment_catalog(room, sort_order);
+
+-- Register legacy treatment_catalog room values (e.g. 'R-1', 'R-2') in the
+-- rooms table so they appear in the new admin Rooms panel for review/rename.
+INSERT INTO rooms (name, sort_order)
+SELECT DISTINCT room, 999
+FROM   treatment_catalog
+ON CONFLICT (name) DO NOTHING;
+
+-- ── Treatment color palette ───────────────────────────────────────
+-- Global, room-agnostic ordering of treatments → drives which palette
+-- color each treatment renders in. The top N (= color_palette size) get
+-- distinct colors; anything beyond wraps. Admin reorders to put the
+-- most-used treatments into the top N from the Treatment Order panel.
+CREATE TABLE IF NOT EXISTS treatments_palette (
+    id          SERIAL PRIMARY KEY,
+    treatment   TEXT NOT NULL UNIQUE,
+    sort_order  INT  NOT NULL DEFAULT 999,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_treatments_palette_order
+    ON treatments_palette(sort_order, treatment);
+
+-- Seed from any treatment that exists in the catalog but isn't yet in the
+-- palette. New treatments get an alphabetical fallback position so the
+-- output stays deterministic until the admin reorders.
+WITH ordered AS (
+  SELECT treatment,
+         ROW_NUMBER() OVER (ORDER BY treatment) AS rn
+  FROM   (SELECT DISTINCT treatment FROM treatment_catalog WHERE treatment IS NOT NULL) t
+)
+INSERT INTO treatments_palette (treatment, sort_order)
+SELECT treatment, rn FROM ordered
+ON CONFLICT (treatment) DO NOTHING;
+
+-- ── Global color palette (8 colors, repeats) ─────────────────────
+-- The Nth treatment (by priority order) renders in color[N mod size].
+-- Admin can edit / reorder these from the Color Palette panel.
+CREATE TABLE IF NOT EXISTS color_palette (
+    id          SERIAL PRIMARY KEY,
+    color       TEXT NOT NULL,                         -- hex (#rrggbb)
+    sort_order  INT  NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_color_palette_order ON color_palette(sort_order);
+
+-- Seed 8 default colors on a fresh install (only when the table is empty).
+INSERT INTO color_palette (color, sort_order)
+SELECT * FROM (VALUES
+    ('#c0392b', 1),  -- red
+    ('#2980b9', 2),  -- blue
+    ('#27ae60', 3),  -- green
+    ('#8e44ad', 4),  -- purple
+    ('#e67e22', 5),  -- orange
+    ('#16a085', 6),  -- teal
+    ('#2c3e50', 7),  -- slate
+    ('#b59e25', 8)   -- olive
+) AS seed(color, sort_order)
+WHERE NOT EXISTS (SELECT 1 FROM color_palette);
 
 -- ── Sitting-position catalog (single global list) ─────────
 CREATE TABLE IF NOT EXISTS sitting_positions (

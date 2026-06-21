@@ -15,6 +15,7 @@ router.get('/patients/:patientId/sessions', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
+              s.pct_bt::float AS pct_bt, s.pct_at::float AS pct_at, s.ss::float AS ss,
               s.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color,
               (SELECT COUNT(*) FROM marks m WHERE m.session_id = s.id)::int AS mark_count
@@ -28,6 +29,66 @@ router.get('/patients/:patientId/sessions', async (req, res) => {
   } catch (e) {
     console.error('[sessions/list]', e);
     res.status(500).json({ error: 'List failed' });
+  }
+});
+
+// GET /api/treatments/sessions/:id — single-session detail (used by the
+// marker page to load the cumulative %BT/%AT/SS measurements).
+router.get('/sessions/:id', async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
+              s.pct_bt::float AS pct_bt, s.pct_at::float AS pct_at, s.ss::float AS ss,
+              s.created_at,
+              d.full_name AS doctor_name, d.color AS doctor_color
+         FROM treatment_sessions s
+         LEFT JOIN doctors d ON d.id = s.doctor_id
+        WHERE s.id = $1`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('[session/get]', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PATCH /api/treatments/sessions/:id
+// Body may include: notes, label, color, pct_bt, pct_at, ss. Only fields
+// present in the body are updated (so a partial autosave can't wipe others).
+router.patch('/sessions/:id', async (req, res) => {
+  const id = +req.params.id;
+  const body = req.body || {};
+  const allowed = {
+    notes:  v => v == null ? null : String(v),
+    label:  v => v == null ? null : String(v),
+    color:  v => v == null ? null : String(v),
+    pct_bt: numOrNull,
+    pct_at: numOrNull,
+    ss:     numOrNull,
+  };
+  const sets = [];
+  const vals = [id];
+  let n = 2;
+  for (const [k, parse] of Object.entries(allowed)) {
+    if (k in body) { sets.push(`${k} = $${n++}`); vals.push(parse(body[k])); }
+  }
+  if (!sets.length) return res.json({ ok: true });
+  try {
+    const { rows } = await query(
+      `UPDATE treatment_sessions SET ${sets.join(', ')}
+        WHERE id = $1
+        RETURNING id, patient_id, doctor_id, session_date, label, color, notes,
+                  pct_bt::float AS pct_bt, pct_at::float AS pct_at, ss::float AS ss`,
+      vals
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('[session/patch]', e);
+    res.status(500).json({ error: 'Save failed' });
   }
 });
 
@@ -93,6 +154,7 @@ router.get('/sessions/:id/marks', async (req, res) => {
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
+              m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
@@ -148,8 +210,9 @@ router.put('/sessions/:id/marks', async (req, res) => {
           `INSERT INTO marks
              (session_id, body_image_id, doctor_id, order_num, rel_x, rel_y,
               tool, color, size, room, room_ids, treatment, effectiveness, sitting_position, note,
+              pct_bt, pct_at, ss,
               client_id, connected_to_cid)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
           [
             id,
             body_image_id || null,
@@ -165,6 +228,9 @@ router.put('/sessions/:id/marks', async (req, res) => {
             m.effectiveness || m.eff || null,
             m.sitting_position || null,
             m.note || null,
+            numOrNull(m.pct_bt),
+            numOrNull(m.pct_at),
+            numOrNull(m.ss),
             m.client_id || null,
             m.connected_to_cid || null,
           ]
@@ -227,6 +293,7 @@ router.get('/patients/:patientId/all', async (req, res) => {
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
+              m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.created_at,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM marks m
@@ -254,6 +321,14 @@ function clampSize(v) {
   const n = Number(v);
   if (!isFinite(n) || n <= 0) return 1.0;
   return Math.max(0.3, Math.min(3.0, n));
+}
+
+// Coerce optional numeric inputs from the client. Empty strings, NaN, and
+// non-finite values become NULL so the DB column stays clean.
+function numOrNull(v) {
+  if (v === '' || v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 // Accept an array of room ids from the client, drop blanks/dupes, return null
