@@ -1,28 +1,50 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-    <title>Treatment Plan</title>
+<!DOCTYPE html>
+<html>
+<head>
+  <base href="/">
 
-    <!-- PWA -->
-    <meta name="theme-color" content="#f5f0e8" />
-    <meta name="description" content="Treatment plan management for clinic staff." />
-    <link rel="icon" href="/favicon.ico" sizes="48x48" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="Treatment" />
-    <meta name="mobile-web-app-capable" content="yes" />
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Treatment Plan — chart-based treatment planning for clinics.">
 
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Sora:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-CGDh173B.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CpIYTe05.css">
-  <link rel="manifest" href="/manifest.webmanifest"></head>
-  <body>
-    <div id="root"></div>
-  </body>
+  <!-- Viewport: prevent zoom shifts around the marker canvas; allow the
+       browser to draw under system UI on modern devices. `viewport-fit=cover`
+       is what makes the CSS env(safe-area-inset-*) values non-zero on iOS
+       so notched devices don't cut off the top bar. -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover, minimum-scale=1, maximum-scale=1, user-scalable=no">
+
+  <!-- Address-bar tint matches the app's paper-cream background so the
+       transition from browser chrome to app content is seamless. -->
+  <meta name="theme-color" content="#2A2A2A"
+        media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#2A2A2A"
+        media="(prefers-color-scheme: dark)">
+
+  <!-- iOS "Add to Home Screen" support. Modern iOS Safari uses these two
+       specific meta tags to launch the site as a full-screen PWA (no
+       Safari chrome) once the user picks "Add to Home Screen" from the
+       share sheet. `apple-touch-icon` is the icon iOS shows on the home
+       screen; without it iOS uses a screenshot of the page. -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Treatment Plan">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="icons/Icon-512.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Treatment Plan</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Runtime config: backend renders this from APP_API_BASE (see server.js).
+       Sets window.APP_CONFIG.apiBase BEFORE Dart code loads so config.dart
+       can read it. Cache-busted server-side so a live-server env change
+       takes effect on the very next page reload — no Flutter rebuild. -->
+  <script src="config.js"></script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
 </html>
