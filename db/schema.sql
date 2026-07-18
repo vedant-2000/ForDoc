@@ -3,6 +3,10 @@
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- ltree: label-tree type used for hierarchical category paths in the store
+-- module (e.g. 'medicines.antibiotics.penicillin'). Supports fast subtree
+-- lookups with GiST.
+CREATE EXTENSION IF NOT EXISTS ltree;
 
 -- ── Admins ─────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS admins (
@@ -98,6 +102,11 @@ ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_bt NUMERIC(6,2);
 ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_at NUMERIC(6,2);
 ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
 
+-- Session-creator label. Populated at insert-time so an admin-created
+-- session (which has doctor_id = NULL, since admins aren't in `doctors`)
+-- still has a name to display in the session list instead of an em-dash.
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS created_by_name TEXT;
+
 -- ── Marks (each placed point on the body diagram) ──────────
 CREATE TABLE IF NOT EXISTS marks (
     id              SERIAL PRIMARY KEY,
@@ -137,6 +146,12 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS room_ids TEXT[];
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS pct_bt NUMERIC(6,2);
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS pct_at NUMERIC(6,2);
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
+
+-- Freehand strokes: chain-of-glyphs marks (double-tap-drag with circle/dot/
+-- square/star tools) and smooth-curve marks (double-tap-drag with the curve
+-- tool) store the polyline path as a JSONB array of [rel_x, rel_y] pairs.
+-- Empty / NULL for single-point marks.
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS path JSONB;
 
 -- Patient/date uniqueness is enforced at the session level
 -- (treatment_sessions has UNIQUE (patient_id, session_date)). The same
@@ -259,6 +274,92 @@ CREATE TABLE IF NOT EXISTS sitting_positions (
 );
 CREATE INDEX IF NOT EXISTS idx_sitting_positions_order
     ON sitting_positions(sort_order);
+
+-- ============================================================
+-- Store / Inventory module
+-- ============================================================
+-- Independent from the treatment-plan tables. `store_categories.path` uses
+-- the ltree extension so arbitrary depths are supported natively — no
+-- adjacency-list recursion needed for "give me every item under
+-- medicines.antibiotics".
+CREATE TABLE IF NOT EXISTS store_categories (
+    id          SERIAL PRIMARY KEY,
+    path        LTREE UNIQUE NOT NULL,               -- e.g. 'medicines.antibiotics.penicillin'
+    name        TEXT NOT NULL,                       -- display name of THIS node
+    sort_order  INT NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_store_categories_path_gist
+    ON store_categories USING GIST (path);
+CREATE INDEX IF NOT EXISTS idx_store_categories_path_btree
+    ON store_categories USING BTREE (path);
+CREATE INDEX IF NOT EXISTS idx_store_categories_sort
+    ON store_categories (sort_order, name);
+
+-- A registered material lives under exactly one category node (the deepest
+-- one that applies). We store `category_path` as a plain LTREE so the client
+-- can filter items with `WHERE category_path <@ 'medicines.antibiotics'`.
+CREATE TABLE IF NOT EXISTS store_items (
+    id             SERIAL PRIMARY KEY,
+    category_path  LTREE NOT NULL,
+    name           TEXT NOT NULL,
+    code           TEXT UNIQUE,                     -- SKU / short code (optional)
+    unit           TEXT,                            -- e.g. 'tablet', 'bottle'
+    notes          TEXT,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_store_items_cat
+    ON store_items USING GIST (category_path);
+CREATE INDEX IF NOT EXISTS idx_store_items_name
+    ON store_items (LOWER(name));
+CREATE INDEX IF NOT EXISTS idx_store_items_code
+    ON store_items (code) WHERE code IS NOT NULL;
+
+-- Inward = a physical arrival of stock at a specific price/date/location.
+-- Each row is one batch. Total on-hand for an item is derived on read:
+-- SUM(inward.quantity) − SUM(outward.quantity).
+CREATE TABLE IF NOT EXISTS store_inward (
+    id                SERIAL PRIMARY KEY,
+    item_id           INT NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
+    inward_date       DATE NOT NULL,
+    quantity          NUMERIC(12,3) NOT NULL,        -- fractional units allowed (bottles, ml, etc.)
+    unit_price        NUMERIC(12,2) NOT NULL,        -- cost per unit at inward
+    storage_location  TEXT,                          -- optional shelf / cupboard label
+    supplier          TEXT,
+    notes             TEXT,
+    created_by_name   TEXT,                          -- snapshot of user who logged the arrival
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_store_inward_item
+    ON store_inward (item_id, inward_date DESC);
+
+-- Outward = an issue / allotment.  `allotted_by_id` + `_role` disambiguates
+-- doctor vs admin (they're separate tables — no shared user id space).
+-- `allotted_to_name` is a free-text recipient (patient's caretaker,
+-- department, external doctor…); `allotted_to_patient_id` is set when the
+-- issue is directly tied to a patient in this system.
+CREATE TABLE IF NOT EXISTS store_outward (
+    id                       SERIAL PRIMARY KEY,
+    item_id                  INT NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
+    inward_id                INT REFERENCES store_inward(id) ON DELETE SET NULL,
+    allotted_by_id           INT,
+    allotted_by_role         TEXT,                   -- 'doctor' | 'admin'
+    allotted_by_name         TEXT,                   -- snapshot
+    allotted_to_name         TEXT,                   -- freeform recipient
+    allotted_to_patient_id   INT REFERENCES patients(id) ON DELETE SET NULL,
+    quantity                 NUMERIC(12,3) NOT NULL,
+    unit_price               NUMERIC(12,2),          -- actual price at issue (nullable → falls back to inward price on display)
+    outward_date             DATE NOT NULL,
+    notes                    TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_store_outward_item
+    ON store_outward (item_id, outward_date DESC);
+CREATE INDEX IF NOT EXISTS idx_store_outward_patient
+    ON store_outward (allotted_to_patient_id) WHERE allotted_to_patient_id IS NOT NULL;
 
 -- ── Treatment reports saved (for audit / re-share) ─────────
 CREATE TABLE IF NOT EXISTS treatment_reports (

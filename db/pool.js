@@ -20,6 +20,19 @@ pool.on('error', (err) => {
   console.error('[pg pool] unexpected error', err);
 });
 
+// Every client the pool hands out gets its own 'error' listener attached
+// here. Without this, a client whose connection is later terminated
+// unexpectedly (e.g. Postgres idle-timeout, network hiccup, DB restart)
+// would emit an unhandled 'error' event on the Client instance and crash
+// the entire Node process — the "Emitted 'error' event on Client instance"
+// stack trace. Log + swallow it; the pool will replace the broken client
+// on the next `connect()`.
+pool.on('connect', (client) => {
+  client.on('error', (err) => {
+    console.error('[pg client] connection error', err.message);
+  });
+});
+
 const query = (text, params) => pool.query(text, params);
 
 const tx = async (fn) => {

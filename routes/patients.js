@@ -7,11 +7,19 @@ const router = express.Router();
 // Both admin & doctor can manage patients (adjust if you want admin-only create).
 router.use(authRequired());
 
-// GET /api/patients?q=
+// GET /api/patients?q=&limit=&offset=
 // Soft-deleted patients are INCLUDED in the response (with deleted_at set) so
-// the UI can show a deleted indicator. Active rows sort first, then deleted.
+// the UI can show a deleted indicator. Active rows sort first, then by most
+// recent session date DESC (fallback to updated_at). Paginated with
+// limit/offset so the client can lazy-load on scroll. Defaults: limit=10.
 router.get('/', async (req, res) => {
   const q = (req.query.q || '').trim();
+  // Clamp so a buggy client can't blow up the DB with a giant limit.
+  const rawLimit = parseInt(req.query.limit, 10);
+  const rawOffset = parseInt(req.query.offset, 10);
+  const limit  = Number.isFinite(rawLimit)  ? Math.max(1, Math.min(100, rawLimit))   : 10;
+  const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset)                 : 0;
+
   try {
     // last_session = most recent treatment_sessions.session_date for the
     // patient; falls back to the patient's own updated_at when no session
@@ -28,8 +36,8 @@ router.get('/', async (req, res) => {
          GROUP BY p.id
          ORDER BY (p.deleted_at IS NULL) DESC,
                   COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
-         LIMIT 200`,
-        [`%${q}%`]
+         LIMIT $2 OFFSET $3`,
+        [`%${q}%`, limit, offset]
       ));
     } else {
       ({ rows } = await query(
@@ -41,7 +49,8 @@ router.get('/', async (req, res) => {
          GROUP BY p.id
          ORDER BY (p.deleted_at IS NULL) DESC,
                   COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
-         LIMIT 200`
+         LIMIT $1 OFFSET $2`,
+        [limit, offset]
       ));
     }
     res.json(rows);
