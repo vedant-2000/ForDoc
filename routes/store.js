@@ -9,11 +9,51 @@
 // items) are admin-only, mirroring the treatment-catalog admin panels.
 
 const express = require('express');
+const path    = require('path');
+const fs      = require('fs');
+const multer  = require('multer');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(authRequired());
+
+// ─────────────────────────────────────────────────────────────
+// Item-photo uploads: files land in backend/uploads/store-items/
+// and are served statically via /uploads/store-items/<filename>.
+// ─────────────────────────────────────────────────────────────
+const PHOTOS_DIR = path.join(__dirname, '..', 'uploads', 'store-items');
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
+const photoStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, PHOTOS_DIR),
+  filename: (req, file, cb) => {
+    const ts = Date.now();
+    const safe = (file.originalname || 'photo').replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    cb(null, `${+req.params.id}_${ts}_${safe}`);
+  },
+});
+const photoUpload = multer({
+  storage: photoStorage,
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    // Accept when either the client-supplied mimetype starts with image/,
+    // or the filename has a known image extension. Some clients (desktop
+    // file pickers) send application/octet-stream instead of a real image
+    // mimetype, so extension is our fallback truth.
+    const mime = String(file.mimetype || '').toLowerCase();
+    const okMime = /^image\//.test(mime);
+    const okExt  = /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i
+      .test(file.originalname || '');
+    if (okMime || okExt) return cb(null, true);
+    return cb(new Error('Only images allowed'));
+  },
+});
+
+function withPhotoUrl(row) {
+  row.url = `/uploads/store-items/${row.filename}`;
+  return row;
+}
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -193,7 +233,8 @@ router.get('/items', async (req, res) => {
               COALESCE(inw.total_in,  0)::float AS total_in,
               COALESCE(out.total_out, 0)::float AS total_out,
               COALESCE(inw.total_in, 0)::float - COALESCE(out.total_out, 0)::float AS on_hand,
-              inw.last_price::float AS last_price
+              inw.last_price::float AS last_price,
+              COALESCE(ph.photos, '[]'::json) AS photos
          FROM store_items i
          LEFT JOIN (
            SELECT item_id,
@@ -207,6 +248,17 @@ router.get('/items', async (req, res) => {
              FROM store_outward
             GROUP BY item_id
          ) out ON out.item_id = i.id
+         LEFT JOIN (
+           SELECT item_id,
+                  JSON_AGG(json_build_object(
+                    'id', id,
+                    'url', '/uploads/store-items/' || filename,
+                    'original_name', original_name,
+                    'mime_type', mime_type
+                  ) ORDER BY sort_order, id) AS photos
+             FROM store_item_photos
+            GROUP BY item_id
+         ) ph ON ph.item_id = i.id
         WHERE ${where.join(' AND ')}
         ORDER BY i.name
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -216,6 +268,72 @@ router.get('/items', async (req, res) => {
   } catch (e) {
     console.error('[store/items/list]', e);
     res.status(500).json({ error: 'List failed' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Item photos
+// ─────────────────────────────────────────────────────────────
+
+// GET /api/store/items/:id/photos
+router.get('/items/:id(\\d+)/photos', async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      `SELECT id, item_id, filename, original_name, mime_type, sort_order, created_at
+         FROM store_item_photos WHERE item_id=$1 ORDER BY sort_order, id`,
+      [id],
+    );
+    rows.forEach(withPhotoUrl);
+    res.json(rows);
+  } catch (e) {
+    console.error('[store/items/photos/list]', e);
+    res.status(500).json({ error: 'List failed' });
+  }
+});
+
+// POST /api/store/items/:id/photos  (admin) — multipart field 'file'
+router.post('/items/:id(\\d+)/photos', authRequired(['admin']), photoUpload.single('file'), async (req, res) => {
+  const id = +req.params.id;
+  if (!req.file) return res.status(400).json({ error: 'file is required' });
+  try {
+    const owner = await query('SELECT id FROM store_items WHERE id=$1', [id]);
+    if (!owner.rows.length) {
+      try { fs.unlinkSync(path.join(PHOTOS_DIR, req.file.filename)); } catch {}
+      return res.status(404).json({ error: 'Item not found' });
+    }
+    const nextSort = await query(
+      `SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM store_item_photos WHERE item_id=$1`,
+      [id],
+    );
+    const { rows } = await query(
+      `INSERT INTO store_item_photos (item_id, filename, original_name, mime_type, sort_order)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, item_id, filename, original_name, mime_type, sort_order, created_at`,
+      [id, req.file.filename, req.file.originalname, req.file.mimetype, nextSort.rows[0].n],
+    );
+    res.status(201).json(withPhotoUrl(rows[0]));
+  } catch (e) {
+    console.error('[store/items/photos/upload]', e);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+// DELETE /api/store/items/:id/photos/:photoId  (admin)
+router.delete('/items/:id(\\d+)/photos/:photoId(\\d+)', authRequired(['admin']), async (req, res) => {
+  const id = +req.params.id;
+  const photoId = +req.params.photoId;
+  try {
+    const { rows } = await query(
+      `DELETE FROM store_item_photos WHERE id=$1 AND item_id=$2 RETURNING filename`,
+      [photoId, id],
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    try { fs.unlinkSync(path.join(PHOTOS_DIR, rows[0].filename)); } catch {}
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[store/items/photos/delete]', e);
+    res.status(500).json({ error: 'Delete failed' });
   }
 });
 

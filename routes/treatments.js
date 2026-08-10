@@ -342,7 +342,10 @@ function clamp01(v) {
 function clampSize(v) {
   const n = Number(v);
   if (!isFinite(n) || n <= 0) return 1.0;
-  return Math.max(0.3, Math.min(3.0, n));
+  // Range must cover the client's kSizes (0.3 … 10). The previous 3.0 cap
+  // silently shrank larger marks on the save round-trip — the mark LOOKED
+  // right until the next reload, then rendered smaller ("saved different").
+  return Math.max(0.3, Math.min(10.0, n));
 }
 
 // Coerce optional numeric inputs from the client. Empty strings, NaN, and

@@ -318,6 +318,22 @@ CREATE INDEX IF NOT EXISTS idx_store_items_name
 CREATE INDEX IF NOT EXISTS idx_store_items_code
     ON store_items (code) WHERE code IS NOT NULL;
 
+-- Photos attached to a store item. Files live on disk under
+-- backend/uploads/store-items/<filename>; the row keeps just the filename +
+-- original name + mime for display / delete. `sort_order` decides the
+-- gallery order the client renders in.
+CREATE TABLE IF NOT EXISTS store_item_photos (
+    id            SERIAL PRIMARY KEY,
+    item_id       INT NOT NULL REFERENCES store_items(id) ON DELETE CASCADE,
+    filename      TEXT NOT NULL,
+    original_name TEXT,
+    mime_type     TEXT,
+    sort_order    INT NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_store_item_photos_item
+    ON store_item_photos (item_id, sort_order, id);
+
 -- Inward = a physical arrival of stock at a specific price/date/location.
 -- Each row is one batch. Total on-hand for an item is derived on read:
 -- SUM(inward.quantity) − SUM(outward.quantity).
