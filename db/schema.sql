@@ -130,6 +130,13 @@ END $$;
 -- still has a name to display in the session list instead of an em-dash.
 ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS created_by_name TEXT;
 
+-- Rooms selected for the session (the chip row above the body diagram).
+-- Previously the selection lived only in widget memory and was stamped onto
+-- each mark as it was placed, so the row itself reset on every reload and a
+-- session with no new marks recorded no rooms at all. Session-level, exactly
+-- like pct_bt / pct_at / ss.
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS rooms TEXT[];
+
 -- ── Marks (each placed point on the body diagram) ──────────
 CREATE TABLE IF NOT EXISTS marks (
     id              SERIAL PRIMARY KEY,

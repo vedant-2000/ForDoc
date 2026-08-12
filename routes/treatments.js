@@ -15,7 +15,7 @@ router.get('/patients/:patientId/sessions', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
-              s.pct_bt, s.pct_at, s.ss,
+              s.pct_bt, s.pct_at, s.ss, s.rooms,
               s.created_at, s.created_by_name,
               d.full_name AS doctor_name, d.color AS doctor_color,
               (SELECT COUNT(*) FROM marks m WHERE m.session_id = s.id)::int AS mark_count
@@ -39,7 +39,7 @@ router.get('/sessions/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
-              s.pct_bt, s.pct_at, s.ss,
+              s.pct_bt, s.pct_at, s.ss, s.rooms,
               s.created_at, s.created_by_name,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM treatment_sessions s
@@ -70,6 +70,9 @@ router.patch('/sessions/:id', async (req, res) => {
     pct_bt: textOrNull,
     pct_at: textOrNull,
     ss:     textOrNull,
+    // Session-level room selection (the chip row). Same sanitizer the
+    // per-mark room_ids uses: dedupe, drop blanks, NULL when empty.
+    rooms:  cleanRoomIds,
   };
   const sets = [];
   const vals = [id];
@@ -83,7 +86,7 @@ router.patch('/sessions/:id', async (req, res) => {
       `UPDATE treatment_sessions SET ${sets.join(', ')}
         WHERE id = $1
         RETURNING id, patient_id, doctor_id, session_date, label, color, notes,
-                  pct_bt, pct_at, ss`,
+                  pct_bt, pct_at, ss, rooms`,
       vals
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
