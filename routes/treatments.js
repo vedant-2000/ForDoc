@@ -15,7 +15,7 @@ router.get('/patients/:patientId/sessions', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
-              s.pct_bt::float AS pct_bt, s.pct_at::float AS pct_at, s.ss::float AS ss,
+              s.pct_bt, s.pct_at, s.ss,
               s.created_at, s.created_by_name,
               d.full_name AS doctor_name, d.color AS doctor_color,
               (SELECT COUNT(*) FROM marks m WHERE m.session_id = s.id)::int AS mark_count
@@ -39,7 +39,7 @@ router.get('/sessions/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `SELECT s.id, s.patient_id, s.doctor_id, s.session_date, s.label, s.color, s.notes,
-              s.pct_bt::float AS pct_bt, s.pct_at::float AS pct_at, s.ss::float AS ss,
+              s.pct_bt, s.pct_at, s.ss,
               s.created_at, s.created_by_name,
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM treatment_sessions s
@@ -65,9 +65,11 @@ router.patch('/sessions/:id', async (req, res) => {
     notes:  v => v == null ? null : String(v),
     label:  v => v == null ? null : String(v),
     color:  v => v == null ? null : String(v),
-    pct_bt: numOrNull,
-    pct_at: numOrNull,
-    ss:     numOrNull,
+    // Free text so a range ("67-70") is preserved verbatim. Trimmed, and
+    // blanked to NULL so an emptied field clears rather than storing ''.
+    pct_bt: textOrNull,
+    pct_at: textOrNull,
+    ss:     textOrNull,
   };
   const sets = [];
   const vals = [id];
@@ -81,7 +83,7 @@ router.patch('/sessions/:id', async (req, res) => {
       `UPDATE treatment_sessions SET ${sets.join(', ')}
         WHERE id = $1
         RETURNING id, patient_id, doctor_id, session_date, label, color, notes,
-                  pct_bt::float AS pct_bt, pct_at::float AS pct_at, ss::float AS ss`,
+                  pct_bt, pct_at, ss`,
       vals
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
@@ -159,6 +161,7 @@ router.get('/sessions/:id/marks', async (req, res) => {
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
+              m.size_y::float AS size_y, m.rotation::float AS rotation,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.path, m.created_at,
@@ -212,7 +215,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
       // round-trip to Postgres instead of N. On a 20-mark session this
       // dropped the PUT latency from ~4s to ~50ms in local testing.
       if (incoming.length) {
-        const COLS = 21;
+        const COLS = 23;
         const values = [];
         const placeholders = [];
         for (let i = 0; i < incoming.length; i++) {
@@ -223,7 +226,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
             `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},` +
             `$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},` +
             `$${base+13},$${base+14},$${base+15},$${base+16},$${base+17},$${base+18},` +
-            `$${base+19},$${base+20},$${base+21})`
+            `$${base+19},$${base+20},$${base+21},$${base+22},$${base+23})`
           );
           values.push(
             id,
@@ -246,6 +249,10 @@ router.put('/sessions/:id/marks', async (req, res) => {
             m.client_id || null,
             m.connected_to_cid || null,
             cleanPath(m.path),
+            // Reshape (independent Y scale) and rotation. Both nullable —
+            // NULL size_y means "uniform", NULL rotation means "upright".
+            m.size_y == null ? null : clampSize(m.size_y),
+            clampRotation(m.rotation),
           );
         }
         await c.query(
@@ -253,7 +260,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
              (session_id, body_image_id, doctor_id, order_num, rel_x, rel_y,
               tool, color, size, room, room_ids, treatment, effectiveness, sitting_position, note,
               pct_bt, pct_at, ss,
-              client_id, connected_to_cid, path)
+              client_id, connected_to_cid, path, size_y, rotation)
            VALUES ${placeholders.join(',')}`,
           values,
         );
@@ -274,6 +281,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
         `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
                 m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
                 m.tool, m.color, m.size::float AS size,
+              m.size_y::float AS size_y, m.rotation::float AS rotation,
                 m.room, m.treatment, m.effectiveness, m.sitting_position, m.note,
                 m.client_id, m.connected_to_cid, m.path, m.created_at,
                 d.full_name AS doctor_name, d.color AS doctor_color
@@ -314,6 +322,7 @@ router.get('/patients/:patientId/all', async (req, res) => {
       `SELECT m.id, m.session_id, m.body_image_id, m.doctor_id, m.order_num,
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
+              m.size_y::float AS size_y, m.rotation::float AS rotation,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.path, m.created_at,
@@ -346,6 +355,26 @@ function clampSize(v) {
   // silently shrank larger marks on the save round-trip — the mark LOOKED
   // right until the next reload, then rendered smaller ("saved different").
   return Math.max(0.3, Math.min(10.0, n));
+}
+
+// Mark rotation in degrees clockwise. Normalized into [0, 360) so the client
+// can send any angle (including negatives from a counter-clockwise drag) and
+// the stored value stays canonical. NULL when absent/zero.
+function clampRotation(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const norm = ((n % 360) + 360) % 360;
+  return norm === 0 ? null : Math.round(norm * 100) / 100;
+}
+
+// Coerce optional free-text inputs (the %BT / %AT / SS measurements). These
+// are TEXT rather than NUMERIC so a clinician can record a range such as
+// "67-70". Trimmed; blank becomes NULL so clearing a field really clears it.
+function textOrNull(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s.slice(0, 40);
 }
 
 // Coerce optional numeric inputs from the client. Empty strings, NaN, and

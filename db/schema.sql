@@ -98,9 +98,32 @@ CREATE INDEX IF NOT EXISTS idx_sessions_patient_date
 --   pct_bt → % Before Treatment
 --   pct_at → % After Treatment
 --   ss     → SS (severity score)
-ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_bt NUMERIC(6,2);
-ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_at NUMERIC(6,2);
-ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
+-- Stored as TEXT (not NUMERIC) so clinicians can record a RANGE — "67-70"
+-- — as well as a plain figure. NUMERIC also forced a 2-decimal scale, which
+-- surfaced in the UI as a stray ".0" on every whole number.
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_bt TEXT;
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS pct_at TEXT;
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS ss     TEXT;
+
+-- Migrate databases created before the change above. Casting through
+-- float8 drops NUMERIC's fixed scale, so 70.00 becomes "70" and 67.50
+-- becomes "67.5" rather than carrying the trailing zeros into TEXT.
+DO $$
+DECLARE c TEXT;
+BEGIN
+  FOREACH c IN ARRAY ARRAY['pct_bt', 'pct_at', 'ss'] LOOP
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_name = 'treatment_sessions'
+         AND column_name = c
+         AND data_type = 'numeric'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE treatment_sessions ALTER COLUMN %I TYPE TEXT USING %I::float8::text',
+        c, c);
+    END IF;
+  END LOOP;
+END $$;
 
 -- Session-creator label. Populated at insert-time so an admin-created
 -- session (which has doctor_id = NULL, since admins aren't in `doctors`)
@@ -152,6 +175,16 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS ss     NUMERIC(6,2);
 -- tool) store the polyline path as a JSONB array of [rel_x, rel_y] pairs.
 -- Empty / NULL for single-point marks.
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS path JSONB;
+
+-- Independent Y-axis scale for "reshape" (stretch) marks. NULL means the
+-- mark is uniform and `size` drives both axes. The client has always sent
+-- this, but without a column to land in the stretch was silently lost on
+-- every reload.
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS size_y NUMERIC(4,2);
+
+-- Mark rotation in DEGREES clockwise, 0 = upright. NULL/0 for unrotated
+-- marks. Full 360° so a glyph can point in any direction.
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS rotation NUMERIC(6,2);
 
 -- Patient/date uniqueness is enforced at the session level
 -- (treatment_sessions has UNIQUE (patient_id, session_date)). The same
