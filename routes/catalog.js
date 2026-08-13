@@ -197,6 +197,61 @@ router.put('/sitting-positions', authRequired(['admin']), async (req, res) => {
   }
 });
 
+// GET /api/catalog/effectiveness → ['1Q','2Q',...]
+router.get('/effectiveness', authRequired(), async (_req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT label FROM effectiveness_options
+        WHERE is_active = TRUE
+        ORDER BY sort_order, label`
+    );
+    res.json(rows.map(r => r.label));
+  } catch (e) {
+    console.error('[catalog/effectiveness GET]', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PUT /api/catalog/effectiveness   body: { options: ['1Q','2Q',...] }
+// Admin: replace the whole list, preserving the array's order.
+router.put('/effectiveness', authRequired(['admin']), async (req, res) => {
+  const list = Array.isArray(req.body?.options) ? req.body.options : null;
+  if (!list) return res.status(400).json({ error: 'options must be an array' });
+
+  const clean = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const p = String(raw || '').trim();
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push(p);
+  }
+
+  try {
+    const rows = await tx(async (c) => {
+      await c.query('DELETE FROM effectiveness_options');
+      for (let i = 0; i < clean.length; i++) {
+        await c.query(
+          `INSERT INTO effectiveness_options (label, sort_order) VALUES ($1, $2)`,
+          [clean[i], i]
+        );
+      }
+      const { rows: r } = await c.query(
+        `SELECT label FROM effectiveness_options
+          WHERE is_active = TRUE
+          ORDER BY sort_order`
+      );
+      return r;
+    });
+    res.json({ options: rows.map(r => r.label) });
+  } catch (e) {
+    console.error('[catalog/effectiveness PUT]', e);
+    res.status(500).json({ error: 'Save failed' });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────
 // Rooms (editable list of treatment-room names)
 // ─────────────────────────────────────────────────────────────

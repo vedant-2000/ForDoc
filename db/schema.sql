@@ -315,6 +315,27 @@ CREATE TABLE IF NOT EXISTS sitting_positions (
 CREATE INDEX IF NOT EXISTS idx_sitting_positions_order
     ON sitting_positions(sort_order);
 
+-- ── Effectiveness catalog (single global list) ────────────
+-- Was a hard-coded 1Q..5Q list in the client. Now admin-editable, same
+-- shape as sitting_positions.
+CREATE TABLE IF NOT EXISTS effectiveness_options (
+    id          SERIAL PRIMARY KEY,
+    label       TEXT UNIQUE NOT NULL,
+    sort_order  INT  NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_effectiveness_order
+    ON effectiveness_options(sort_order);
+
+-- Seed the historical 1Q..5Q values on a fresh database so nothing changes
+-- for existing users. Only when the table is completely empty, so an admin
+-- who clears the list doesn't get it repopulated on the next migration.
+INSERT INTO effectiveness_options (label, sort_order)
+SELECT v.label, v.ord
+  FROM (VALUES ('1Q',0), ('2Q',1), ('3Q',2), ('4Q',3), ('5Q',4)) AS v(label, ord)
+ WHERE NOT EXISTS (SELECT 1 FROM effectiveness_options);
+
 -- ============================================================
 -- Store / Inventory module
 -- ============================================================
