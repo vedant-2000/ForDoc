@@ -165,6 +165,7 @@ router.get('/sessions/:id/marks', async (req, res) => {
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
               m.size_y::float AS size_y, m.rotation::float AS rotation,
+              m.thickness::float AS thickness,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.path, m.created_at,
@@ -218,7 +219,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
       // round-trip to Postgres instead of N. On a 20-mark session this
       // dropped the PUT latency from ~4s to ~50ms in local testing.
       if (incoming.length) {
-        const COLS = 23;
+        const COLS = 24;
         const values = [];
         const placeholders = [];
         for (let i = 0; i < incoming.length; i++) {
@@ -229,7 +230,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
             `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},` +
             `$${base+7},$${base+8},$${base+9},$${base+10},$${base+11},$${base+12},` +
             `$${base+13},$${base+14},$${base+15},$${base+16},$${base+17},$${base+18},` +
-            `$${base+19},$${base+20},$${base+21},$${base+22},$${base+23})`
+            `$${base+19},$${base+20},$${base+21},$${base+22},$${base+23},$${base+24})`
           );
           values.push(
             id,
@@ -256,6 +257,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
             // NULL size_y means "uniform", NULL rotation means "upright".
             m.size_y == null ? null : clampSize(m.size_y),
             clampRotation(m.rotation),
+            clampThickness(m.thickness),
           );
         }
         await c.query(
@@ -263,7 +265,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
              (session_id, body_image_id, doctor_id, order_num, rel_x, rel_y,
               tool, color, size, room, room_ids, treatment, effectiveness, sitting_position, note,
               pct_bt, pct_at, ss,
-              client_id, connected_to_cid, path, size_y, rotation)
+              client_id, connected_to_cid, path, size_y, rotation, thickness)
            VALUES ${placeholders.join(',')}`,
           values,
         );
@@ -285,6 +287,7 @@ router.put('/sessions/:id/marks', async (req, res) => {
                 m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
                 m.tool, m.color, m.size::float AS size,
               m.size_y::float AS size_y, m.rotation::float AS rotation,
+              m.thickness::float AS thickness,
                 m.room, m.treatment, m.effectiveness, m.sitting_position, m.note,
                 m.client_id, m.connected_to_cid, m.path, m.created_at,
                 d.full_name AS doctor_name, d.color AS doctor_color
@@ -326,6 +329,7 @@ router.get('/patients/:patientId/all', async (req, res) => {
               m.rel_x::float AS rel_x, m.rel_y::float AS rel_y,
               m.tool, m.color, m.size::float AS size,
               m.size_y::float AS size_y, m.rotation::float AS rotation,
+              m.thickness::float AS thickness,
               m.room, m.room_ids, m.treatment, m.effectiveness, m.sitting_position, m.note,
               m.pct_bt::float AS pct_bt, m.pct_at::float AS pct_at, m.ss::float AS ss,
               m.client_id, m.connected_to_cid, m.path, m.created_at,
@@ -358,6 +362,16 @@ function clampSize(v) {
   // silently shrank larger marks on the save round-trip — the mark LOOKED
   // right until the next reload, then rendered smaller ("saved different").
   return Math.max(0.3, Math.min(10.0, n));
+}
+
+// Per-mark line weight in pixels, matching the LINE slider's 0–5 range.
+// NULL (or 0) means "automatic" — the client scales the weight with the
+// mark's size instead of pinning it.
+function clampThickness(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(Math.min(5, n) * 100) / 100;
 }
 
 // Mark rotation in degrees clockwise. Normalized into [0, 360) so the client

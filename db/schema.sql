@@ -193,6 +193,10 @@ ALTER TABLE marks ADD COLUMN IF NOT EXISTS size_y NUMERIC(4,2);
 -- marks. Full 360° so a glyph can point in any direction.
 ALTER TABLE marks ADD COLUMN IF NOT EXISTS rotation NUMERIC(6,2);
 
+-- Per-mark line weight in pixels. NULL = automatic (weight scales with the
+-- mark's size). Set from the LINE slider, alongside size / size_y.
+ALTER TABLE marks ADD COLUMN IF NOT EXISTS thickness NUMERIC(4,2);
+
 -- Patient/date uniqueness is enforced at the session level
 -- (treatment_sessions has UNIQUE (patient_id, session_date)). The same
 -- treatment may legitimately be applied to multiple body regions within one
