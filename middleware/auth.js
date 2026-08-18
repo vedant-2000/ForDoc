@@ -3,8 +3,18 @@ const jwt = require('jsonwebtoken');
 const SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const EXPIRES = process.env.JWT_EXPIRES_IN || '12h';
 
+// Setting JWT_EXPIRES_IN to any of these makes sessions permanent: the token
+// is signed WITHOUT an `exp` claim, so it never expires and the user is never
+// logged out on their own. Revocation then depends entirely on rotating
+// JWT_SECRET, which invalidates every outstanding token at once.
+const NEVER_EXPIRES = ['never', 'none', 'infinite', 'infinity', 'off', '0']
+  .includes(String(EXPIRES).trim().toLowerCase());
+
 function sign(payload) {
-  return jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
+  // Omitting `expiresIn` leaves the `exp` claim off the token entirely.
+  return NEVER_EXPIRES
+    ? jwt.sign(payload, SECRET)
+    : jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
 }
 
 function verify(token) {
