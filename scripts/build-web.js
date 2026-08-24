@@ -32,7 +32,10 @@ if (target === 'react') {
   fs.cpSync(distDir, publicDir, { recursive: true });
   console.log(`✓ React build copied to ${publicDir}`);
 } else {
-  const flutterDir = path.join(__dirname, '..', '..', 'flutter_app');
+  // Points at the CURRENT desktop app (paint_for_doc), which is what the
+  // Windows build ships. The old flutter_app port is no longer the
+  // source of truth for the web build.
+  const flutterDir = path.join(__dirname, '..', '..', 'paint_for_doc');
   const buildDir  = path.join(flutterDir, 'build', 'web');
   if (!fs.existsSync(flutterDir)) {
     console.error(`Flutter folder not found at ${flutterDir}`);

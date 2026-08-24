@@ -1,6 +1,7 @@
 const express = require('express');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const D = require('../utils/drive');
 
 const router = express.Router();
 
@@ -29,7 +30,8 @@ router.get('/', async (req, res) => {
       ({ rows } = await query(
         `SELECT p.id, p.patient_code, p.full_name, p.phone,
                 p.created_at, p.updated_at, p.deleted_at,
-                MAX(s.session_date) AS last_session
+                MAX(s.session_date) AS last_session,
+                COUNT(s.id)::int    AS session_count
          FROM patients p
          LEFT JOIN treatment_sessions s ON s.patient_id = p.id
          WHERE p.patient_code ILIKE $1 OR p.full_name ILIKE $1
@@ -43,7 +45,8 @@ router.get('/', async (req, res) => {
       ({ rows } = await query(
         `SELECT p.id, p.patient_code, p.full_name, p.phone,
                 p.created_at, p.updated_at, p.deleted_at,
-                MAX(s.session_date) AS last_session
+                MAX(s.session_date) AS last_session,
+                COUNT(s.id)::int    AS session_count
          FROM patients p
          LEFT JOIN treatment_sessions s ON s.patient_id = p.id
          GROUP BY p.id
@@ -91,12 +94,45 @@ router.post('/', async (req, res) => {
        RETURNING *`,
       [patient_code.trim(), full_name.trim(), phone || null, notes || null]
     );
-    res.status(201).json(rows[0]);
+    const patient = rows[0];
+    res.status(201).json(patient);
+
+    // Fire-and-forget AFTER responding: a new patient gets their Drive
+    // folder immediately, so staff can drop an X-ray straight into Drive
+    // before anything has been uploaded through the app. Deliberately not
+    // awaited - creating a patient must not hang on, or fail because of,
+    // Google. If it fails the folder is made on the first upload instead.
+    D.getSettings()
+      .then((s) => {
+        if (s.auto_create_patient_folder === false) return null;
+        return D.ensurePatientFolderForId(
+          patient.id, req.user.role === 'admin' ? req.user.id : null);
+      })
+      .catch(() => {});
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'patient_code already exists' });
     console.error('[patients/create]', e);
     res.status(500).json({ error: 'Create failed' });
   }
+});
+
+// POST /api/patients/:id/drive-folder - create the folder on demand.
+//
+// For patients that predate this feature, or whose creation-time attempt
+// failed because Drive was down. `force=1` re-resolves even when one is
+// already recorded.
+router.post('/:id(\\d+)/drive-folder', async (req, res) => {
+  const id = +req.params.id;
+  const force = String(req.query.force || '') === '1';
+  const folder = await D.ensurePatientFolderForId(
+    id, req.user.role === 'admin' ? req.user.id : null, { force });
+  if (!folder) {
+    return res.status(502).json({
+      error: 'Could not create the Drive folder. Check that Google Drive is '
+        + 'connected in Admin -> Google Drive.',
+    });
+  }
+  res.json({ ok: true, folder });
 });
 
 // PATCH /api/patients/:id
@@ -118,6 +154,14 @@ router.patch('/:id', async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
+
+    // A renamed or re-coded patient should not leave a stale label on their
+    // Drive folder. Best-effort, after the response, and only when the name
+    // actually feeds the template.
+    if (full_name !== undefined || patient_code !== undefined) {
+      D.renamePatientFolder(id, req.user.role === 'admin' ? req.user.id : null)
+        .catch(() => {});
+    }
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'patient_code already exists' });
     res.status(500).json({ error: 'Update failed' });
@@ -145,6 +189,67 @@ router.delete('/:id', async (req, res) => {
     res.json({ ok: true, deleted_at: r.rows[0].deleted_at });
   } catch (e) {
     res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// POST /api/patients/:id/restore  (admin only) — undo a soft delete.
+// Only succeeds if the patient's code isn't now taken by a live patient,
+// since the partial unique index allows the code to be reused after a
+// soft delete.
+router.post('/:id/restore', async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      'SELECT patient_code, deleted_at FROM patients WHERE id=$1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (rows[0].deleted_at == null) return res.json({ ok: true });
+
+    const clash = await query(
+      `SELECT 1 FROM patients
+        WHERE patient_code = $1 AND deleted_at IS NULL AND id <> $2
+        LIMIT 1`,
+      [rows[0].patient_code, id],
+    );
+    if (clash.rowCount) {
+      return res.status(409).json({
+        error: `Code ${rows[0].patient_code} is now used by an active patient. `
+             + 'Rename that one first.',
+      });
+    }
+    await query(
+      'UPDATE patients SET deleted_at = NULL, updated_at = NOW() WHERE id=$1',
+      [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[patients/restore]', e);
+    res.status(500).json({ error: 'Restore failed' });
+  }
+});
+
+// DELETE /api/patients/:id/purge  (admin only) — PERMANENT delete.
+//
+// Unlike the soft delete above this is irreversible: the row is removed and
+// every session, mark and saved report cascades away with it. Only allowed
+// on a patient that has ALREADY been soft-deleted, so a permanent wipe can
+// never be a single mis-click — the UI has to delete first, then purge.
+router.delete('/:id/purge', async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      'SELECT deleted_at FROM patients WHERE id=$1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (rows[0].deleted_at == null) {
+      return res.status(409).json({
+        error: 'Patient must be deleted before it can be permanently removed.',
+      });
+    }
+    await query('DELETE FROM patients WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[patients/purge]', e);
+    res.status(500).json({ error: 'Permanent delete failed' });
   }
 });
 

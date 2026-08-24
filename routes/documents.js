@@ -1,0 +1,355 @@
+// Patient documents — X-rays, scans, reports, prescriptions, photos and the
+// treatment records exported from the marking page.
+//
+// STORAGE MODEL — every document lives in two places:
+//
+//   1. backend/uploads/patient-docs/<filename>
+//      Served statically at /uploads/patient-docs/<filename>, exactly like
+//      body images and store photos. This is what both clients render: it is
+//      fast, needs no Google round-trip, and keeps working when Drive is
+//      disconnected or the network to Google is down.
+//
+//   2. Google Drive, under the folder chain configured in drive_settings.
+//      This is the durable, shareable copy the clinic actually keeps.
+//
+// Only the LINKS live in Postgres. The Drive half is tracked by `sync_status`
+// independently of the row: a document whose Drive push failed is still
+// completely usable from the local copy and can be retried later. Losing an
+// X-ray because Google timed out is not an acceptable outcome.
+//
+// Uploads are stored VERBATIM — no resize, no re-encode. A clinical image is
+// evidence; the client sends full quality and we keep every byte of it.
+
+const express = require('express');
+const path    = require('path');
+const fs      = require('fs');
+const multer  = require('multer');
+const { query } = require('../db/pool');
+const { authRequired } = require('../middleware/auth');
+const D = require('../utils/drive');
+
+const router = express.Router();
+
+const DOCS_DIR = path.join(__dirname, '..', 'uploads', 'patient-docs');
+if (!fs.existsSync(DOCS_DIR)) fs.mkdirSync(DOCS_DIR, { recursive: true });
+
+const CATEGORIES = [
+  'xray', 'scan', 'report', 'prescription', 'photo', 'treatment', 'other',
+];
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, DOCS_DIR),
+  filename: (_req, file, cb) => {
+    const ts = Date.now();
+    const safe = String(file.originalname || 'file')
+      .replace(/[^a-zA-Z0-9.\-_]/g, '_')
+      .slice(-80);
+    cb(null, `${ts}_${Math.random().toString(36).slice(2, 8)}_${safe}`);
+  },
+});
+
+// 60 MB: a full-resolution X-ray or a multi-page PDF report comfortably fits,
+// and the point of this feature is that the ORIGINAL is kept.
+const upload = multer({ storage, limits: { fileSize: 60 * 1024 * 1024 } });
+
+function cat(v) {
+  const c = String(v || 'other').toLowerCase().trim();
+  return CATEGORIES.includes(c) ? c : 'other';
+}
+
+function textOrNull(v, max = 500) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s.slice(0, max);
+}
+
+function dateOrToday(v) {
+  const s = String(v || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : new Date().toISOString().slice(0, 10);
+}
+
+function withUrls(row) {
+  if (!row) return row;
+  row.url = row.filename ? `/uploads/patient-docs/${row.filename}` : null;
+  return row;
+}
+
+const SELECT_COLS = `
+  d.id, d.patient_id, d.session_id, d.problem_id, d.category, d.title, d.notes,
+  d.doc_date, d.filename, d.original_name, d.mime_type, d.size_bytes,
+  d.drive_file_id, d.drive_view_link, d.drive_download_link, d.drive_path,
+  d.sync_status, d.sync_error, d.uploaded_by_name, d.created_at`;
+
+// ─────────────────────────────────────────────────────────────
+// Push one already-saved row's bytes to Drive.
+//
+// Never throws: a Drive failure is recorded on the row and reported to the
+// caller, but it must not fail the upload — the file is already safe locally.
+// ─────────────────────────────────────────────────────────────
+async function pushToDrive(docId, adminId) {
+  const { rows } = await query(
+    `SELECT d.*, p.patient_code, p.full_name, p.drive_folder_id AS patient_folder_id
+       FROM patient_documents d
+       JOIN patients p ON p.id = d.patient_id
+      WHERE d.id = $1`, [docId]);
+  if (!rows.length) return { ok: false, error: 'Document not found' };
+  const doc = rows[0];
+
+  const abs = path.join(DOCS_DIR, doc.filename || '');
+  if (!doc.filename || !fs.existsSync(abs)) {
+    await query(
+      `UPDATE patient_documents SET sync_status='failed', sync_error=$2 WHERE id=$1`,
+      [docId, 'Local file missing']);
+    return { ok: false, error: 'Local file missing' };
+  }
+
+  try {
+    const settings = await D.getSettings();
+    const drive = await D.getDriveForAdmin(adminId);
+    // Prefer the folder created with the patient; falls back to resolving
+    // the whole chain by name when there isn't one yet.
+    let patientFolderId = doc.patient_folder_id;
+    if (!patientFolderId) {
+      const ensured = await D.ensurePatientFolderForId(doc.patient_id, adminId);
+      patientFolderId = ensured && ensured.id;
+    }
+    const folder = await D.resolveDocumentFolder(drive, settings, {
+      patientCode: doc.patient_code,
+      patientName: doc.full_name,
+      category: doc.category,
+      docDate: doc.doc_date,
+      patientFolderId,
+    });
+
+    // Name it so the file is identifiable straight from the Drive UI, even
+    // detached from our database.
+    const ext = path.extname(doc.original_name || doc.filename || '') || '';
+    const stamp = new Date(doc.doc_date).toISOString().slice(0, 10);
+    const label = (doc.title || doc.category || 'document')
+      .replace(/[\\/:*?"<>|]/g, '-').slice(0, 60);
+    const name = `${stamp}_${doc.patient_code}_${label}${ext}`;
+
+    const uploaded = await D.uploadFile(drive, {
+      name,
+      mimeType: doc.mime_type || 'application/octet-stream',
+      buffer: fs.readFileSync(abs),
+      parentId: folder.id,
+      makePublic: settings.make_links_public !== false,
+    });
+
+    await query(
+      `UPDATE patient_documents
+          SET drive_file_id=$2, drive_view_link=$3, drive_download_link=$4,
+              drive_folder_id=$5, drive_path=$6,
+              sync_status='synced', sync_error=NULL
+        WHERE id=$1`,
+      [docId, uploaded.id, uploaded.webViewLink || null,
+       uploaded.webContentLink || null, folder.id, folder.path]);
+    return { ok: true, file: uploaded, folder };
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e).slice(0, 400);
+    await query(
+      `UPDATE patient_documents SET sync_status='failed', sync_error=$2 WHERE id=$1`,
+      [docId, msg]);
+    return { ok: false, error: msg };
+  }
+}
+
+router.use(authRequired());
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/documents?patient_id=&category=&problem_id=&from=&to=&group=
+//
+// group=date returns the same rows bucketed by doc_date, newest day first —
+// the "date wise" view. Anything else returns the flat list — the "all
+// documents" view. Both clients offer the two side by side, so the server
+// serves both shapes rather than making each client regroup.
+// ─────────────────────────────────────────────────────────────
+router.get('/', async (req, res) => {
+  const pid = +req.query.patient_id;
+  if (!pid) return res.status(400).json({ error: 'patient_id required' });
+
+  const where = ['d.patient_id = $1', 'd.deleted_at IS NULL'];
+  const vals = [pid];
+  let n = 2;
+  if (req.query.category) { where.push(`d.category = $${n++}`); vals.push(cat(req.query.category)); }
+  if (req.query.problem_id) { where.push(`d.problem_id = $${n++}`); vals.push(+req.query.problem_id); }
+  if (req.query.session_id) { where.push(`d.session_id = $${n++}`); vals.push(+req.query.session_id); }
+  if (req.query.from) { where.push(`d.doc_date >= $${n++}`); vals.push(String(req.query.from)); }
+  if (req.query.to) { where.push(`d.doc_date <= $${n++}`); vals.push(String(req.query.to)); }
+
+  try {
+    const { rows } = await query(
+      `SELECT ${SELECT_COLS}
+         FROM patient_documents d
+        WHERE ${where.join(' AND ')}
+        ORDER BY d.doc_date DESC, d.id DESC`,
+      vals);
+    const docs = rows.map(withUrls);
+
+    if (String(req.query.group || '') === 'date') {
+      const buckets = [];
+      const index = new Map();
+      for (const doc of docs) {
+        const key = new Date(doc.doc_date).toISOString().slice(0, 10);
+        if (!index.has(key)) {
+          index.set(key, { date: key, documents: [] });
+          buckets.push(index.get(key));
+        }
+        index.get(key).documents.push(doc);
+      }
+      return res.json({ groups: buckets, total: docs.length });
+    }
+    res.json({ documents: docs, total: docs.length });
+  } catch (e) {
+    console.error('[documents/list]', e);
+    res.status(500).json({ error: 'List failed' });
+  }
+});
+
+// GET /api/documents/categories — the vocabulary, so clients don't hardcode it
+router.get('/categories', (_req, res) => {
+  res.json(CATEGORIES.map((c) => ({ id: c, label: D.categoryFolderName(c) })));
+});
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/documents  (multipart: file + fields)
+//
+// The response comes back as soon as the LOCAL copy is written and the row
+// exists — the Drive push runs inside the request but its failure only marks
+// the row, never rejects the upload. The client shows the row immediately
+// with whatever sync_status came back.
+// ─────────────────────────────────────────────────────────────
+router.post('/', upload.single('file'), async (req, res) => {
+  const b = req.body || {};
+  const pid = +b.patient_id;
+  if (!pid) return res.status(400).json({ error: 'patient_id required' });
+  if (!req.file) return res.status(400).json({ error: 'file required' });
+
+  try {
+    const { rows: pr } = await query(
+      'SELECT id FROM patients WHERE id=$1 AND deleted_at IS NULL', [pid]);
+    if (!pr.length) return res.status(404).json({ error: 'Patient not found' });
+
+    const { rows } = await query(
+      `INSERT INTO patient_documents
+         (patient_id, session_id, problem_id, category, title, notes, doc_date,
+          filename, original_name, mime_type, size_bytes,
+          uploaded_by, uploaded_by_name, sync_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending')
+       RETURNING id`,
+      [
+        pid,
+        b.session_id ? +b.session_id : null,
+        b.problem_id ? +b.problem_id : null,
+        cat(b.category),
+        textOrNull(b.title, 200),
+        textOrNull(b.notes, 2000),
+        dateOrToday(b.doc_date),
+        req.file.filename,
+        textOrNull(req.file.originalname, 200),
+        req.file.mimetype || null,
+        req.file.size || null,
+        req.user.id || null,
+        textOrNull(req.user.username, 120),
+      ]);
+
+    const id = rows[0].id;
+    const sync = await pushToDrive(id, req.user.role === 'admin' ? req.user.id : null);
+
+    const { rows: out } = await query(
+      `SELECT ${SELECT_COLS} FROM patient_documents d WHERE d.id=$1`, [id]);
+    res.status(201).json({
+      document: withUrls(out[0]),
+      drive: sync.ok ? { ok: true } : { ok: false, error: sync.error },
+    });
+  } catch (e) {
+    console.error('[documents/create]', e);
+    res.status(500).json({ error: e.message || 'Upload failed' });
+  }
+});
+
+// PATCH /api/documents/:id — edit the metadata (never the bytes)
+router.patch('/:id(\\d+)', async (req, res) => {
+  const id = +req.params.id;
+  const b = req.body || {};
+  const sets = [];
+  const vals = [id];
+  let n = 2;
+  if ('category' in b)   { sets.push(`category = $${n++}`);   vals.push(cat(b.category)); }
+  if ('title' in b)      { sets.push(`title = $${n++}`);      vals.push(textOrNull(b.title, 200)); }
+  if ('notes' in b)      { sets.push(`notes = $${n++}`);      vals.push(textOrNull(b.notes, 2000)); }
+  if ('doc_date' in b)   { sets.push(`doc_date = $${n++}`);   vals.push(dateOrToday(b.doc_date)); }
+  if ('problem_id' in b) { sets.push(`problem_id = $${n++}`); vals.push(b.problem_id ? +b.problem_id : null); }
+  if (!sets.length) return res.json({ ok: true });
+
+  try {
+    const { rows } = await query(
+      `UPDATE patient_documents SET ${sets.join(', ')}
+        WHERE id=$1 AND deleted_at IS NULL RETURNING id`, vals);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const { rows: out } = await query(
+      `SELECT ${SELECT_COLS} FROM patient_documents d WHERE d.id=$1`, [id]);
+    res.json(withUrls(out[0]));
+  } catch (e) {
+    console.error('[documents/patch]', e);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// POST /api/documents/:id/drive-retry — re-attempt a failed Drive push
+router.post('/:id(\\d+)/drive-retry', async (req, res) => {
+  const r = await pushToDrive(+req.params.id,
+    req.user.role === 'admin' ? req.user.id : null);
+  const { rows } = await query(
+    `SELECT ${SELECT_COLS} FROM patient_documents d WHERE d.id=$1`, [+req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Not found' });
+  res.json({ document: withUrls(rows[0]), drive: r });
+});
+
+// DELETE /api/documents/:id — soft delete by default.
+//
+// The Drive copy is deliberately LEFT ALONE unless ?drive=1 is passed: Drive
+// is the clinic's archive of record, and a mis-click in the app should not
+// reach into it. `purge=1` (admin) removes the local file and the row too.
+router.delete('/:id(\\d+)', async (req, res) => {
+  const id = +req.params.id;
+  const purge = String(req.query.purge || '') === '1' && req.user.role === 'admin';
+  const alsoDrive = String(req.query.drive || '') === '1';
+
+  try {
+    const { rows } = await query(
+      'SELECT * FROM patient_documents WHERE id=$1', [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const doc = rows[0];
+
+    if (alsoDrive && doc.drive_file_id) {
+      try {
+        const drive = await D.getDriveForAdmin(
+          req.user.role === 'admin' ? req.user.id : null);
+        await drive.files.delete({ fileId: doc.drive_file_id });
+      } catch (e) {
+        console.warn('[documents/delete] drive delete failed:', e.message);
+      }
+    }
+
+    if (purge) {
+      if (doc.filename) {
+        try { fs.unlinkSync(path.join(DOCS_DIR, doc.filename)); } catch {}
+      }
+      await query('DELETE FROM patient_documents WHERE id=$1', [id]);
+    } else {
+      await query(
+        'UPDATE patient_documents SET deleted_at = NOW() WHERE id=$1', [id]);
+    }
+    res.json({ ok: true, purged: purge });
+  } catch (e) {
+    console.error('[documents/delete]', e);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+module.exports = router;
+module.exports.pushToDrive = pushToDrive;
+module.exports.DOCS_DIR = DOCS_DIR;
+module.exports.CATEGORIES = CATEGORIES;

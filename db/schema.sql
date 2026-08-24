@@ -453,3 +453,98 @@ CREATE TABLE IF NOT EXISTS treatment_reports (
     created_by      INT REFERENCES doctors(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ═══════════════════════════════════════════════════════════
+-- Patient problems + documents (Drive-backed)
+-- ═══════════════════════════════════════════════════════════
+
+-- ── Drive settings (single row, id = 1) ───────────────────
+-- Where in Drive patient documents land. The admin edits this from
+-- Admin → Google Drive; every upload resolves its folder chain from here,
+-- creating folders on demand.
+--
+-- root_folder_id wins when set (an explicit Drive folder id, e.g. a Shared
+-- Drive). Otherwise root_path is created as a folder chain from My Drive.
+CREATE TABLE IF NOT EXISTS drive_settings (
+    id                  INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    root_folder_id      TEXT,
+    root_path           TEXT NOT NULL DEFAULT 'Treatment Record',
+    -- Placeholders: {code} {name} {year} {month} {date} {category}
+    patient_folder_tmpl TEXT NOT NULL DEFAULT '{code} - {name}',
+    category_subfolders BOOLEAN NOT NULL DEFAULT TRUE,
+    date_subfolders     BOOLEAN NOT NULL DEFAULT FALSE,
+    make_links_public   BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO drive_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- ── Patient problems ──────────────────────────────────────
+-- The clinical complaints a patient is being treated for. Documents and
+-- treatment sessions can be filed against one.
+CREATE TABLE IF NOT EXISTS patient_problems (
+    id              SERIAL PRIMARY KEY,
+    patient_id      INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    description     TEXT,
+    severity        TEXT,                                -- mild | moderate | severe
+    status          TEXT NOT NULL DEFAULT 'open',        -- open | resolved
+    noted_on        DATE NOT NULL DEFAULT CURRENT_DATE,
+    resolved_on     DATE,
+    created_by_name TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_patient_problems_patient
+    ON patient_problems (patient_id, noted_on DESC, id DESC);
+
+-- ── Patient documents ─────────────────────────────────────
+-- One row per uploaded file. The BYTES live in two places — backend/uploads
+-- (served over /uploads/patient-docs/... so both clients can render them
+-- without a Drive round-trip) and Google Drive (the durable copy). Only the
+-- links live here.
+--
+-- sync_status tracks the Drive half independently: a document whose Drive
+-- push failed is still fully usable from the local copy, and can be retried.
+CREATE TABLE IF NOT EXISTS patient_documents (
+    id                  SERIAL PRIMARY KEY,
+    patient_id          INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    session_id          INT REFERENCES treatment_sessions(id) ON DELETE SET NULL,
+    problem_id          INT REFERENCES patient_problems(id) ON DELETE SET NULL,
+    -- xray | scan | report | prescription | photo | treatment | other
+    category            TEXT NOT NULL DEFAULT 'other',
+    title               TEXT,
+    notes               TEXT,
+    doc_date            DATE NOT NULL DEFAULT CURRENT_DATE,
+    filename            TEXT,                            -- uploads/patient-docs/<filename>
+    original_name       TEXT,
+    mime_type           TEXT,
+    size_bytes          BIGINT,
+    drive_file_id       TEXT,
+    drive_view_link     TEXT,
+    drive_download_link TEXT,
+    drive_folder_id     TEXT,
+    drive_path          TEXT,                            -- human-readable folder chain
+    sync_status         TEXT NOT NULL DEFAULT 'pending', -- pending|synced|failed|skipped
+    sync_error          TEXT,
+    uploaded_by         INT,
+    uploaded_by_name    TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_patient_documents_patient
+    ON patient_documents (patient_id, doc_date DESC, id DESC)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_patient_documents_problem
+    ON patient_documents (problem_id) WHERE problem_id IS NOT NULL;
+
+-- ── Per-patient Drive folder ──────────────────────────────
+-- The folder is created when the PATIENT is created, not lazily on the first
+-- upload, so the clinic can drop files straight into Drive for a patient who
+-- has no documents in the app yet. The id is stored rather than re-resolved
+-- by name every time: if someone moves or renames the folder in Drive,
+-- uploads keep following it.
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS drive_folder_id   TEXT;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS drive_folder_path TEXT;
+
+ALTER TABLE drive_settings
+    ADD COLUMN IF NOT EXISTS auto_create_patient_folder BOOLEAN NOT NULL DEFAULT TRUE;

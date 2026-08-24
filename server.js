@@ -24,6 +24,8 @@ app.use('/api/images',     require('./routes/images'));
 app.use('/api/drive',      require('./routes/drive'));
 app.use('/api/catalog',    require('./routes/catalog'));
 app.use('/api/store',      require('./routes/store'));
+app.use('/api/problems',   require('./routes/problems'));
+app.use('/api/documents',  require('./routes/documents'));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
