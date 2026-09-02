@@ -177,22 +177,22 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       ? classified.filter((c) => c.status === status)
       : classified;
 
+    // The TRUE length of the candidate list, captured before anything below
+    // adjusts the (approximate, best-effort) displayed total. has_more is
+    // computed against this, never against a number that can drift as more
+    // of the list gets checked.
+    const trueFilteredLength = filtered.length;
+
     let page = filtered.slice(offset, offset + limit);
     let filteredTotal = filtered.length;
+    let nextOffset = offset + page.length;
 
     // ── Reach beyond the base: search each unmatched code AS TEXT ──
     //
-    // For every still-Missing row on THIS page, ask Drive's search index for
-    // the code and validate the hits with the same whole-token regex used
-    // everywhere else. Bounded work - at most `limit` searches, five in
-    // flight, each cached for a minute - so the cost scales with what is on
-    // screen, not with how many patients the clinic has.
-    //
-    // The counts above come from the cheap pass, so a row upgraded here can
-    // read "Match found" while sitting under the Missing filter. That is the
-    // honest ordering: the count says what the bulk pass knew, the row says
-    // what the search just found.
-    if (drive) {
+    // Only for 'missing': that is the one filter where a row can be found
+    // and REMOVED from the page below, which is what makes a page come back
+    // short or empty mid-list and is the only case that needs the walk.
+    if (drive && status === 'missing') {
       // Drive's `contains` matches word-prefixes, so search the longest
       // alphanumeric run of the code ('Toc-12565' -> '12565') and let the
       // regex re-validate the FULL code against each hit's name.
@@ -202,9 +202,29 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
         return runs[0] || String(code || '').trim();
       };
 
-      const todo = page.filter((r) => !r.suggestion && r.status === 'missing');
-      for (let i = 0; i < todo.length; i += 5) {
-        await Promise.all(todo.slice(i, i + 5).map(async (r) => {
+      // Walk forward from `offset`, searching each candidate and keeping
+      // only the ones still genuinely missing - TOPPING UP past the naive
+      // [offset, offset+limit) window whenever some of that window's rows
+      // turn out to already have a Drive folder. Without this, a page where
+      // every row happened to be findable came back completely empty in the
+      // middle of the list: "Nothing is missing" next to an enabled Next
+      // button, and a total that said 201 remained.
+      //
+      // Bounded to a few times `limit` candidates, so one page load cannot
+      // trigger an unbounded run of Drive searches against a clinic with
+      // hundreds of Missing patients still to check.
+      const MAX_CHECKS = limit * 4;
+      let cursor = offset;
+      let checked = 0;
+      let upgraded = 0;
+      const kept = [];
+
+      while (kept.length < limit && cursor < filtered.length && checked < MAX_CHECKS) {
+        const batch = filtered.slice(cursor, cursor + 5);
+        cursor += batch.length;
+        checked += batch.length;
+
+        await Promise.all(batch.map(async (r) => {
           try {
             const term = searchTermFor(r.patient_code);
             if (term.length < 2) return;
@@ -233,30 +253,36 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
             // Missing until the next look.
           }
         }));
+
+        for (const r of batch) {
+          if (r.status === 'missing') kept.push(r);
+          else upgraded++;
+        }
       }
 
-      // A row the search just upgraded no longer belongs in the bucket it
-      // was filtered into a moment ago - pull it back out, and move the
-      // counts with it, so 'Missing' can never show a row that says 'Found
-      // in Drive' right underneath it. filtered.length (below) still counts
-      // it as the OLD status; subtract it here so the "X of Y" on screen
-      // reflects what THIS check just confirmed, not what the cheap pass
-      // guessed before anyone looked.
-      if (status) {
-        const stillMatches = page.filter((r) => r.status === status);
-        const upgraded = page.length - stillMatches.length;
-        if (upgraded > 0) {
-          counts.missing = Math.max(0, counts.missing - upgraded);
-          counts.suggestion += upgraded;
-        }
-        page = stillMatches;
-        filteredTotal -= upgraded;
+      page = kept;
+      // Where the NEXT page must resume. Because the walk can consume more
+      // than `limit` candidates topping this page up, "next = offset+limit"
+      // would skip or duplicate rows - this is the one true cursor position.
+      nextOffset = cursor;
+
+      // The counts above come from the cheap pass; move only what THIS walk
+      // actually confirmed. Total remains an approximation for whatever is
+      // still unchecked further down the list - it can only ever go down as
+      // more of the list gets looked at, never invent numbers for rows no
+      // request has reached yet.
+      if (upgraded > 0) {
+        counts.missing = Math.max(0, counts.missing - upgraded);
+        counts.suggestion += upgraded;
+        filteredTotal = Math.max(0, filteredTotal - upgraded);
       }
     }
 
     res.json({
       patients: page,
       total: Math.max(0, filteredTotal),
+      next_offset: nextOffset,
+      has_more: nextOffset < trueFilteredLength,
       counts,
       base_folder_id: baseId,
       drive_error: driveError,
