@@ -219,6 +219,106 @@ function renderPopupPage({ ok, title, detail }) {
   </body></html>`;
 }
 
+// GET /api/drive/find-folder?code=12565            (admin)
+//
+// Answers "why is this patient not matching?" without guessing.
+//
+// The worklist and the reconcile report only ever look at the DIRECT children
+// of the configured base folder - Drive's `'<id>' in parents` - so a folder
+// that is nested deeper, or sitting in a different tree entirely, is invisible
+// to them no matter how well its name matches. That is indistinguishable, on
+// screen, from "the code does not match", and the two need completely
+// different fixes.
+//
+// This searches the WHOLE Drive by name in one API call and reports the full
+// path of every hit, plus whether that hit is inside the current base. So the
+// answer is either "your base folder is pointed at the wrong place", "these
+// folders are nested too deep", or "nothing in Drive carries this code".
+router.get('/find-folder', authRequired(['admin']), async (req, res) => {
+  const code = String(req.query.code || '').trim();
+  const name = String(req.query.name || '').trim();
+  if (!code && !name) {
+    return res.status(400).json({
+      error: 'code or name is required', code: 'bad_request',
+    });
+  }
+  try {
+    const settings = await D.getSettings();
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const baseId = await D.baseFolderId(drive, settings);
+
+    // Drive's own search: finds the folder at ANY depth, in one call each.
+    // Two searches because Drive has no OR across `name contains` terms, and
+    // a clinic that files by name has folders the code alone will never find.
+    const seenIds = new Set();
+    const hits = [];
+    for (const term of [code, name].filter(Boolean)) {
+      for (const f of await D.listFolders(drive, { q: term, fresh: true })) {
+        if (seenIds.add(f.id)) hits.push(f);
+      }
+    }
+
+    // Then filter properly. Drive's `contains` is loose - searching 256 will
+    // happily return 12565 - so the code must match as a whole token, and the
+    // name as a normalised substring.
+    const re = code ? D.patientCodeRegExp(code) : null;
+    const nameNorm = name ? D.normalizeFolderName(name) : '';
+    const matched = [];
+    for (const f of hits) {
+      const norm = D.normalizeFolderName(f.name);
+      const byCode = re != null && re.test(norm);
+      const byName = nameNorm.length > 2 && norm.includes(nameNorm);
+      if (!byCode && !byName) continue;
+      matched.push({
+        ...f,
+        matched_on: byCode && byName ? 'both' : (byCode ? 'code' : 'name'),
+      });
+    }
+    // Strongest evidence first: a code AND name hit is almost certainly the
+    // same patient; a bare name hit could be a different person entirely.
+    const rank = { both: 0, code: 1, name: 2 };
+    matched.sort((a, b) => rank[a.matched_on] - rank[b.matched_on]);
+
+    // Direct children of the base, to say whether each hit is reachable.
+    let baseChildren = [];
+    try {
+      baseChildren = await D.listFolders(drive, { parentId: baseId || 'root' });
+    } catch { /* base unreadable - reported as in_base:false below */ }
+    const inBase = new Set(baseChildren.map((f) => f.id));
+
+    const out = [];
+    for (const f of matched.slice(0, 25)) {
+      out.push({
+        id: f.id,
+        name: f.name,
+        path: await D.folderPath(drive, f.id),
+        in_base: inBase.has(f.id),
+        matched_on: f.matched_on,
+      });
+    }
+
+    res.json({
+      code,
+      name,
+      base_folder_id: baseId,
+      base_folder_path: baseId ? await D.folderPath(drive, baseId) : null,
+      base_child_count: baseChildren.length,
+      name_hits: hits.length,
+      matches: out,
+      // The whole point: says which of the three problems this is.
+      verdict: out.length === 0
+        ? 'no_folder_in_drive'
+        : (out.some((m) => m.in_base)
+            ? 'ok_in_base'
+            : 'found_outside_base'),
+    });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[drive/find-folder]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // GET /api/drive/reconcile   (admin)
 //
 // Cross-check the patient list against the folders actually sitting in the

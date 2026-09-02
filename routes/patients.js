@@ -330,13 +330,20 @@ router.post('/', async (req, res) => {
     // before anything has been uploaded through the app. Deliberately not
     // awaited - creating a patient must not hang on, or fail because of,
     // Google. If it fails the folder is made on the first upload instead.
-    D.getSettings()
-      .then((s) => {
-        if (s.auto_create_patient_folder === false) return null;
-        return D.ensurePatientFolderForId(
-          patient.id, req.user.role === 'admin' ? req.user.id : null);
-      })
-      .catch(() => {});
+    // skip_drive_folder: the caller has already picked an existing folder to
+    // reuse and will link it next. Without this the automatic create races
+    // that link and leaves an empty duplicate behind in Drive.
+    const skipFolder = (req.body || {}).skip_drive_folder === true
+      || String((req.body || {}).skip_drive_folder || '') === 'true';
+    if (!skipFolder) {
+      D.getSettings()
+        .then((s) => {
+          if (s.auto_create_patient_folder === false) return null;
+          return D.ensurePatientFolderForId(
+            patient.id, req.user.role === 'admin' ? req.user.id : null);
+        })
+        .catch(() => {});
+    }
   } catch (e) {
     if (e.code === '23505') return res.status(409).json({ error: 'patient_code already exists' });
     console.error('[patients/create]', e);
