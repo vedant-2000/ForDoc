@@ -77,7 +77,7 @@ All optional. Defaults suit a single clinic box.
 ## 3. Checking it is working
 
 ```bash
-curl http://localhost:4000/api/health
+curl http://16.171.10.44:4000/api/health
 ```
 
 ```json

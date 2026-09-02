@@ -12,7 +12,7 @@ that one account. Doctors never sign in to Google themselves.
 Two Google rules shape all of this, and both bite here:
 
 1. **Redirect URIs must be `https://…` or `http://localhost`.**
-   A plain-HTTP IP address like `http://localhost:4000` **cannot** be
+   A plain-HTTP IP address like `http://16.171.10.44:4000` **cannot** be
    registered. So the callback can never land on the server directly unless
    the server gets a domain and a certificate.
 
@@ -103,7 +103,7 @@ completed the Google verification process"*.
 - **Authorised redirect URIs → Add URI**, exactly this, with no trailing
   slash:
   ```
-  http://localhost:4000/api/drive/callback
+  http://16.171.10.44:4000/api/drive/callback
   ```
   Leave *Authorised JavaScript origins* empty — the browser never calls
   Google directly, the backend does.
@@ -153,7 +153,7 @@ Edit `backend/.env` — these three keys already exist and are currently blank:
 ```env
 GOOGLE_CLIENT_ID=<the client ID from step 1>
 GOOGLE_CLIENT_SECRET=<the client secret from step 1>
-GOOGLE_REDIRECT_URI=http://localhost:4000/api/drive/callback
+GOOGLE_REDIRECT_URI=http://16.171.10.44:4000/api/drive/callback
 ```
 
 `GOOGLE_REDIRECT_URI` must match the URI you registered **character for
@@ -182,12 +182,12 @@ Open **Admin → Google Drive** in either app.
 1. Press **Sign in with Google**. A browser tab opens.
 2. Choose your account, click through the unverified-app warning if it
    appears (Advanced → Go to … (unsafe)), and **Allow**.
-3. The browser now tries to reach `http://localhost:4000/…` and shows
+3. The browser now tries to reach `http://16.171.10.44:4000/…` and shows
    **"This site can't be reached"**. **This is expected** — that address is
    your own computer, and the server is elsewhere. Do not close the tab.
 4. **Copy the entire address** from the browser's address bar. It looks like:
    ```
-   http://localhost:4000/api/drive/callback?code=4/0AVMBsJ...&scope=https://www.googleapis.com/auth/drive
+   http://16.171.10.44:4000/api/drive/callback?code=4/0AVMBsJ...&scope=https://www.googleapis.com/auth/drive
    ```
 5. Back in the app, click **"Sign-in page didn't come back? Finish it
    manually"**, paste that address, press **Connect**.
