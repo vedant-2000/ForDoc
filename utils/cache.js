@@ -19,7 +19,7 @@ const store = new Map();
 // Hard ceiling so a long-lived process can never accumulate keys without
 // bound. Far above the number of distinct folders a clinic has; the sweep
 // normally keeps the map an order of magnitude under this.
-const MAX_ENTRIES = 500;
+const MAX_ENTRIES = 2000;
 
 /**
  * Drop expired entries, then oldest-first if still over the ceiling.
@@ -95,4 +95,22 @@ function stats() {
   return { entries: store.size, live, max: MAX_ENTRIES };
 }
 
-module.exports = { get, bust, sweep, stats };
+/**
+ * Read a live entry WITHOUT fetching on miss. Returns undefined when absent
+ * or expired. Exists for callers that only want to CONSULT accumulated
+ * knowledge (per-patient Drive match verdicts) and must never trigger a
+ * Google round-trip from inside a tight classification loop.
+ */
+function peek(key) {
+  const hit = store.get(key);
+  if (!hit || hit.expires <= Date.now()) return undefined;
+  return hit.value;
+}
+
+/** Store a known value directly - the write half of peek(). */
+function put(key, ttlMs, value) {
+  sweep(1);
+  store.set(key, { value, expires: Date.now() + ttlMs });
+}
+
+module.exports = { get, bust, sweep, stats, peek, put };

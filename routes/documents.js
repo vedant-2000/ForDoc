@@ -568,6 +568,53 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/content', async (req, res) => {
   }
 });
 
+// GET /api/documents/drive/:fileId/thumb   — Drive's own thumbnail, proxied
+//
+// Drive generates a small preview image for most files (including PDFs) and
+// hands out its URL as thumbnailLink - but that URL lives on
+// googleusercontent.com, which sends no CORS headers. A desktop app can load
+// it; the flutter WEB build cannot (CanvasKit fetches images with fetch(),
+// and the browser blocks the cross-origin response). That asymmetry is why
+// the grid showed glyphs while clicking through to the carousel - which
+// streams full bytes through /content above - worked fine.
+//
+// So: resolve the link server-side (Node has no CORS), download the small
+// image here, and re-serve it from our own origin behind the same auth as
+// every other document byte. The thumbnail is ~a few KB versus the full
+// file's megabytes, which is the whole point of using it for grid tiles.
+router.get('/drive/:fileId([A-Za-z0-9_-]+)/thumb', async (req, res) => {
+  const fileId = req.params.fileId;
+  try {
+    const drive = await D.getDriveForAdmin(
+      req.user.role === 'admin' ? req.user.id : null);
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'thumbnailLink,mimeType',
+      supportsAllDrives: true,
+    });
+    const link = meta.data.thumbnailLink;
+    if (!link) {
+      // Drive hasn't generated a preview (rare: brand-new upload, or an
+      // unsupported type). The client falls back to its own renderer.
+      return res.status(404).json({ error: 'No thumbnail', code: 'no_thumbnail' });
+    }
+
+    // The link is short-lived and Google-signed; fetch it NOW, server-side.
+    const r = await fetch(link);
+    if (!r.ok) {
+      return res.status(404).json({ error: 'Thumbnail expired', code: 'no_thumbnail' });
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.type(r.headers.get('content-type') || 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buf);
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[documents/drive-thumb]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // DELETE /api/documents/:id — soft delete by default.
 //
 // The Drive copy is deliberately LEFT ALONE unless ?drive=1 is passed: Drive

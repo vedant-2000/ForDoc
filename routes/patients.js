@@ -2,6 +2,26 @@ const express = require('express');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
 const D = require('../utils/drive');
+const cache = require('../utils/cache');
+
+// Per-patient Drive match verdicts, accumulated as the worklist's per-page
+// searches run. 'none' means "searched the whole Drive, nothing carries this
+// code"; an object is the folder that does. 15 minutes: long enough that
+// paging through the whole Missing list sees one consistent world, short
+// enough that a folder created in Drive shows up without a restart. The
+// Reload button (fresh=1) ignores and rewrites these.
+const VERDICT_TTL_MS = 15 * 60_000;
+const verdictKey = (code) => `driveMatch:${String(code || '').toLowerCase()}`;
+
+// Drive's `contains` matches word-prefixes and the inventory indexes whole
+// tokens, so both are keyed by the longest alphanumeric run of the code
+// ('Toc-12565' -> '12565'); the full-code regex re-validates every candidate
+// before anything is suggested.
+const searchTermFor = (code) => {
+  const runs = String(code || '').match(/[a-zA-Z0-9]+/g) || [];
+  runs.sort((a, b) => b.length - a.length);
+  return runs[0] || String(code || '').trim();
+};
 
 const router = express.Router();
 
@@ -113,14 +133,12 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       const settings = await D.getSettings();
       drive = await D.getDriveForAdmin(req.user.id);
       baseId = await D.baseFolderId(drive, settings);
-      // Base children only, for the bulk pass. A drive-wide LISTING was tried
-      // here and made matching WORSE: files.list truncates at maxPages x 200
-      // in name order, this Drive holds more folders than that, and the
-      // alphabetical cutoff silently dropped real patient folders (Match
-      // found fell 60 -> 36 the day it shipped). One parent's children can
-      // always be listed completely; reach beyond the base comes from
-      // per-code SEARCHES on the visible page below, which use Drive's own
-      // index and cannot be truncated by folder count.
+      // Base children first: this one parent's listing is always complete
+      // and decides in_place vs elsewhere. Reach beyond the base comes from
+      // the whole-Drive folder INVENTORY fetched just below — paged to
+      // exhaustion, unlike the capped name-ordered listing that was tried
+      // here once and silently dropped real folders (Match found fell
+      // 60 -> 36 the day it shipped).
       folders = await D.listFolders(drive, { parentId: baseId || 'root', fresh });
     } catch (e) {
       driveError = e.message;
@@ -128,10 +146,26 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
     const baseChildIds = new Set(folders.map((f) => f.id));
     const sitsInBase = (folderId) => baseChildIds.has(folderId);
 
+    // Every folder name in the Drive, indexed by token (cached ~15 min,
+    // single-flight, so only the first request per window pays the
+    // enumeration). With this in hand the classify pass below matches every
+    // patient against the WHOLE Drive in memory — the counts are exact on
+    // the first response instead of converging as pages are viewed.
+    let inv = null;
+    if (drive) {
+      try {
+        inv = await D.folderInventory(drive, { fresh });
+      } catch (e) {
+        // An accelerator, not a dependency: the per-code search walk below
+        // still covers matching if enumeration fails.
+        console.warn('[patients/drive-folders] folder inventory unavailable:', e.message);
+      }
+    }
+
     const classified = patients.map((p) => {
       const inBase = !!(p.drive_folder_id && sitsInBase(p.drive_folder_id));
       let suggestion = null;
-      if (!inBase && folders.length) {
+      if (!inBase && (folders.length || inv)) {
         const codeRe = D.patientCodeRegExp(p.patient_code);
         const nameNorm = D.normalizeFolderName(p.full_name);
         let best = null;
@@ -148,6 +182,46 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
         if (best) {
           // Everything in this pass is a base child by construction.
           suggestion = { id: best.id, name: best.name, in_base: true };
+        }
+
+        // Not a base child: look the code up in the whole-Drive inventory.
+        // One Map hit replaces the per-code Google search the walk below
+        // used to make for this row.
+        if (!suggestion && inv && codeRe) {
+          const term = searchTermFor(p.patient_code).toLowerCase();
+          let invBest = null;
+          if (term.length >= 2) {
+            for (const f of inv.byToken.get(term) || []) {
+              const n = D.normalizeFolderName(f.name);
+              if (!codeRe.test(n)) continue;
+              let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
+              if (baseChildIds.has(f.id)) score += 5;
+              if (!invBest || score > invBest.score) invBest = { ...f, score };
+            }
+          }
+          if (invBest) {
+            suggestion = {
+              id: invBest.id,
+              name: invBest.name,
+              in_base: baseChildIds.has(invBest.id),
+            };
+          }
+        }
+
+        // No base-child match: consult what earlier page-searches already
+        // learned about this code. This is what makes the Missing badge
+        // CONVERGE - without it, every discovery was forgotten between
+        // requests and the count stayed wrong no matter how much had
+        // actually been found.
+        if (!suggestion && !fresh) {
+          const v = cache.peek(verdictKey(p.patient_code));
+          if (v && v !== 'none') {
+            suggestion = {
+              id: v.id,
+              name: v.name,
+              in_base: baseChildIds.has(v.id),
+            };
+          }
         }
       }
 
@@ -192,16 +266,12 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
     // Only for 'missing': that is the one filter where a row can be found
     // and REMOVED from the page below, which is what makes a page come back
     // short or empty mid-list and is the only case that needs the walk.
-    if (drive && status === 'missing') {
-      // Drive's `contains` matches word-prefixes, so search the longest
-      // alphanumeric run of the code ('Toc-12565' -> '12565') and let the
-      // regex re-validate the FULL code against each hit's name.
-      const searchTermFor = (code) => {
-        const runs = String(code || '').match(/[a-zA-Z0-9]+/g) || [];
-        runs.sort((a, b) => b.length - a.length);
-        return runs[0] || String(code || '').trim();
-      };
-
+    // With a COMPLETE inventory the pass above already matched every row
+    // against every folder name in the Drive: nothing is left to search, no
+    // row can upgrade mid-page, and the plain slice is exact. The walk
+    // survives purely as the fallback for a Drive too large to enumerate
+    // (inventory truncated at the cap) or an enumeration that failed.
+    if (drive && status === 'missing' && !(inv && inv.complete)) {
       // Walk forward from `offset`, searching each candidate and keeping
       // only the ones still genuinely missing - TOPPING UP past the naive
       // [offset, offset+limit) window whenever some of that window's rows
@@ -226,6 +296,13 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
 
         await Promise.all(batch.map(async (r) => {
           try {
+            // A cached 'none' verdict means this code was already searched
+            // across the whole Drive and found nothing - do not pay Google
+            // for the same answer on every page load. (A cached MATCH never
+            // reaches here: the bulk pass above already upgraded that row.)
+            if (!fresh && cache.peek(verdictKey(r.patient_code)) === 'none') {
+              return;
+            }
             const term = searchTermFor(r.patient_code);
             if (term.length < 2) return;
             const hits = await D.listFolders(drive, { q: term, fresh });
@@ -240,6 +317,11 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
               if (baseChildIds.has(f.id)) score += 5;
               if (!best || score > best.score) best = { ...f, score };
             }
+            // Remember the answer either way. The negative verdict is the
+            // one that saves money: genuinely-missing patients are the rows
+            // that get looked at over and over.
+            cache.put(verdictKey(r.patient_code), VERDICT_TTL_MS,
+              best ? { id: best.id, name: best.name } : 'none');
             if (best) {
               r.suggestion = {
                 id: best.id,
@@ -250,7 +332,8 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
             }
           } catch {
             // One failed search must not sink the page; the row simply stays
-            // Missing until the next look.
+            // Missing until the next look - and no verdict is recorded, so
+            // it will genuinely be retried.
           }
         }));
 

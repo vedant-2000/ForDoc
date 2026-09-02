@@ -391,6 +391,82 @@ async function listFolders(drive, opts = {}) {
   return cache.get(key, FOLDER_TTL_MS, () => listFoldersUncached(drive, opts));
 }
 
+// ===========================================================
+// Whole-Drive folder inventory (what the matcher matches against)
+// ===========================================================
+
+// 15 minutes: long enough that paging the whole worklist reads ONE
+// consistent snapshot, short enough that folders created by hand in Drive
+// appear without a restart. Reload (fresh) re-enumerates on demand.
+const INVENTORY_TTL_MS = 15 * 60_000;
+
+/**
+ * EVERY folder in the Drive — id, name, parents — plus an index of the
+ * names by alphanumeric token.
+ *
+ * Both earlier matching strategies had a hole this closes:
+ *  - a name-ordered listing capped at maxPages x 200 truncated on a Drive
+ *    this size and silently dropped real patient folders;
+ *  - per-code searches were complete but cost one Google round-trip per
+ *    unmatched patient, so the Missing count only converged page by page.
+ * Paging files.list to EXHAUSTION (no orderBy, 1000 a page, loop while
+ * Google keeps handing back a nextPageToken) removes the truncation, and
+ * doing it once per TTL turns every code lookup into a Map hit.
+ * `complete` goes false only if the hard cap trips — callers fall back to
+ * per-code searches then, so an enormous Drive degrades, never lies.
+ *
+ * Deliberately NOT busted by bustFolders(): creating or moving one folder
+ * doesn't invalidate the other few thousand names, the row that changed is
+ * re-classified from its db link anyway, and re-paying a multi-second
+ * enumeration after every click would undo the point of having one.
+ */
+async function folderInventoryUncached(drive) {
+  const folders = [];
+  let pageToken;
+  let pages = 0;
+  do {
+    const { data } = await drive.files.list({
+      q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
+      fields: 'nextPageToken, files(id,name,parents,shortcutDetails)',
+      pageSize: 1000,
+      pageToken,
+      spaces: 'drive',
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      corpora: 'allDrives',
+    });
+    for (const f of data.files || []) {
+      if (!f.shortcutDetails) {
+        folders.push({ id: f.id, name: f.name, parents: f.parents || [] });
+      }
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken && ++pages < 60);   // 60k folders; see `complete`
+
+  // Tokens come from the SAME normalization the validating regex uses, so
+  // the index can never hide a folder the regex would have accepted: any
+  // code the regex finds in a name necessarily appears there as whole
+  // tokens, and its longest token is therefore always an index key.
+  const byToken = new Map();
+  for (const f of folders) {
+    const seen = new Set();
+    for (const t of normalizeFolderName(f.name).split(/[^a-z0-9]+/)) {
+      if (t.length < 2 || seen.has(t)) continue;
+      seen.add(t);
+      const arr = byToken.get(t);
+      if (arr) arr.push(f);
+      else byToken.set(t, [f]);
+    }
+  }
+  return { folders, byToken, complete: !pageToken, fetched_at: Date.now() };
+}
+
+async function folderInventory(drive, { fresh = false } = {}) {
+  const key = `allFolders:${driveOwner(drive)}`;
+  if (fresh) cache.bust(key);
+  return cache.get(key, INVENTORY_TTL_MS, () => folderInventoryUncached(drive));
+}
+
 /**
  * Files (not folders) directly inside `parentId`.
  *
@@ -929,6 +1005,7 @@ module.exports = {
   FULL_SCOPE,
   hasFullScope,
   listFolders,
+  folderInventory,
   listFiles,
   walkPatientFiles,
   categoryFromFolderName,
