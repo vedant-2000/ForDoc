@@ -112,14 +112,24 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       const settings = await D.getSettings();
       const drive = await D.getDriveForAdmin(req.user.id);
       baseId = await D.baseFolderId(drive, settings);
-      folders = await D.listFolders(drive, { parentId: baseId || 'root', fresh });
+      // The WHOLE Drive, not the base folder's children. This clinic's real
+      // archive lives in a different tree than the configured base, and a
+      // matcher that never looked outside the base called every one of those
+      // patients "Missing" - the names matched fine; the folders were simply
+      // never in the searched set. 15 pages x 200 covers ~3000 folders,
+      // comfortably above a one-clinic Drive.
+      folders = await D.listFolders(drive, { everywhere: true, maxPages: 15, fresh });
     } catch (e) {
       driveError = e.message;
     }
-    const folderIds = new Set(folders.map((f) => f.id));
+    const foldersById = new Map(folders.map((f) => [f.id, f]));
+    const sitsInBase = (folderId) => {
+      const f = foldersById.get(folderId);
+      return !!(f && baseId && (f.parents || []).includes(baseId));
+    };
 
     const classified = patients.map((p) => {
-      const inBase = !!(p.drive_folder_id && folderIds.has(p.drive_folder_id));
+      const inBase = !!(p.drive_folder_id && sitsInBase(p.drive_folder_id));
       let suggestion = null;
       if (!inBase && folders.length) {
         const codeRe = D.patientCodeRegExp(p.patient_code);
@@ -129,11 +139,21 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
           for (const f of folders) {
             const n = D.normalizeFolderName(f.name);
             if (!codeRe.test(n)) continue;
-            const score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
+            // The code must match as a whole token; the name only ever adds
+            // confidence on top. An in-base copy outranks an identical match
+            // elsewhere, because linking it needs no move afterwards.
+            let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
+            if (baseId && (f.parents || []).includes(baseId)) score += 5;
             if (!best || score > best.score) best = { ...f, score };
           }
         }
-        if (best) suggestion = { id: best.id, name: best.name };
+        if (best) {
+          suggestion = {
+            id: best.id,
+            name: best.name,
+            in_base: !!(baseId && (best.parents || []).includes(baseId)),
+          };
+        }
       }
 
       // One state per row, in the order that decides what to DO about it.
@@ -211,10 +231,7 @@ router.get('/:id(\\d+)/drive-files', async (req, res) => {
     const drive = await D.getDriveForAdmin(
       req.user.role === 'admin' ? req.user.id : null);
 
-    const [rootFiles, subs] = await Promise.all([
-      D.listFiles(drive, { parentId: root, fresh }),
-      D.listFolders(drive, { parentId: root, fresh }),
-    ]);
+    const files = await D.walkPatientFiles(drive, { rootFolderId: root, fresh });
 
     // What the server knows, keyed by the Drive file it corresponds to.
     const { rows: docs } = await query(
@@ -225,15 +242,6 @@ router.get('/:id(\\d+)/drive-files', async (req, res) => {
     const byDriveId = new Map();
     for (const d of docs) {
       if (d.drive_file_id) byDriveId.set(d.drive_file_id, d);
-    }
-
-    const files = rootFiles.map((f) => ({ ...f, folder: '' }));
-    // Sequential, not Promise.all over every subfolder: a patient with eight
-    // category folders would otherwise fire eight parallel Drive calls and
-    // invite the rate limiting we already classify elsewhere.
-    for (const sub of subs) {
-      const kids = await D.listFiles(drive, { parentId: sub.id, fresh });
-      for (const f of kids) files.push({ ...f, folder: sub.name });
     }
 
     // Graft the server's knowledge on.

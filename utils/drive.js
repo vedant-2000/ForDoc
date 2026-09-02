@@ -323,7 +323,7 @@ async function saveSettings(patch) {
 /// Child folders of [parentId] ('root' for My Drive), or a name search across
 /// the whole Drive when [q] is given. Trashed folders and shortcuts are left
 /// out; Shared Drives are included so a clinic filing into one can pick it.
-async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize = 200, maxPages = 10 } = {}) {
+async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize = 200, maxPages = 10, everywhere = false } = {}) {
   const clauses = [
     "mimeType='application/vnd.google-apps.folder'",
     'trashed=false',
@@ -331,7 +331,12 @@ async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize 
   const term = String(q || '').trim().replace(/['\\]/g, '');
   if (term) {
     clauses.push(`name contains '${term}'`);
-  } else {
+  } else if (!everywhere) {
+    // No parent clause in `everywhere` mode: the whole Drive, paged. Exists
+    // because a clinic's real archive often lives NOWHERE NEAR the configured
+    // base folder, and a matcher that only looks at the base's children calls
+    // every one of those patients "Missing" no matter how well their folder
+    // names match.
     clauses.push(`'${String(parentId || 'root').replace(/['\\]/g, '')}' in parents`);
   }
 
@@ -354,7 +359,10 @@ async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize 
       corpora: 'allDrives',
     });
     for (const f of data.files || []) {
-      if (!f.shortcutDetails) out.push({ id: f.id, name: f.name });
+      // parents lets callers tell WHERE a folder lives - inside the base or
+      // off in another tree - which decides whether a match is "in place" or
+      // merely "found somewhere".
+      if (!f.shortcutDetails) out.push({ id: f.id, name: f.name, parents: f.parents || [] });
     }
     pageToken = data.nextPageToken;
     if (!pageToken) break;
@@ -375,9 +383,10 @@ async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize 
  * entire job is reporting Drive's current truth).
  */
 async function listFolders(drive, opts = {}) {
-  const { parentId = 'root', q = '', fresh = false } = opts;
+  const { parentId = 'root', q = '', fresh = false, everywhere = false } = opts;
   const owner = driveOwner(drive);
-  const key = `folders:${owner}:${parentId}:${q}`;
+  // '*' keys the drive-wide listing separately from any single parent's.
+  const key = `folders:${owner}:${everywhere ? '*' : parentId}:${q}`;
   if (fresh) cache.bust(key);
   return cache.get(key, FOLDER_TTL_MS, () => listFoldersUncached(drive, opts));
 }
@@ -438,6 +447,9 @@ function bustFolders(drive, parentId) {
   if (parentId) {
     cache.bust(`folders:${owner}:${parentId}:`);
     cache.bust(`files:${owner}:${parentId}`);
+    // The drive-wide listing contains every parent's children, so any
+    // single-parent change stales it too.
+    cache.bust(`folders:${owner}:*:`);
   } else {
     cache.bust('folders:');
     cache.bust('files:');
@@ -544,6 +556,47 @@ const CATEGORY_FOLDERS = {
   treatment: 'Treatment Records',
   other: 'Other',
 };
+
+/**
+ * The reverse of CATEGORY_FOLDERS: a Drive subfolder name back to a category
+ * key, for guessing the category of a file nobody filed through the app.
+ * '' (the patient's own root folder, not a subfolder) reads as 'other'.
+ */
+function categoryFromFolderName(folderName) {
+  const n = String(folderName || '').trim().toLowerCase();
+  if (!n) return 'other';
+  for (const [key, label] of Object.entries(CATEGORY_FOLDERS)) {
+    if (label.toLowerCase() === n) return key;
+  }
+  return 'other';
+}
+
+/**
+ * Every file inside a patient's Drive folder: the folder itself, plus its
+ * direct category subfolders (Photos, X-Ray, ...). Depth 2, matching how
+ * resolveDocumentFolder files things - going deeper would cost one Drive
+ * round-trip per folder for tree shapes nobody creates here.
+ *
+ * Shared by the patient-folder media view and the documents list, so a file
+ * dropped straight into Drive shows up consistently in both, rather than
+ * only wherever someone remembered to add a Drive walk.
+ */
+async function walkPatientFiles(drive, { rootFolderId, fresh = false } = {}) {
+  if (!rootFolderId) return [];
+  const [rootFiles, subs] = await Promise.all([
+    listFiles(drive, { parentId: rootFolderId, fresh }),
+    listFolders(drive, { parentId: rootFolderId, fresh }),
+  ]);
+  const files = rootFiles.map((f) => ({ ...f, folder: '' }));
+  // Sequential, not Promise.all over every subfolder: a patient with eight
+  // category folders would otherwise fire eight parallel Drive calls and
+  // invite the rate limiting classifyDriveError already exists to handle.
+  for (const sub of subs) {
+    const kids = await listFiles(drive, { parentId: sub.id, fresh });
+    for (const f of kids) files.push({ ...f, folder: sub.name });
+  }
+  return files;
+}
 
 function categoryFolderName(category) {
   return CATEGORY_FOLDERS[String(category || 'other').toLowerCase()] || 'Other';
@@ -877,6 +930,8 @@ module.exports = {
   hasFullScope,
   listFolders,
   listFiles,
+  walkPatientFiles,
+  categoryFromFolderName,
   folderPath,
   getOAuth2Client,
   getDriveForAdmin,

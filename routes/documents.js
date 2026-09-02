@@ -234,6 +234,74 @@ router.get('/', async (req, res) => {
       vals);
     const docs = rows.map(withUrls);
 
+    // Best-effort: also surface files that exist ONLY in Drive - dropped in
+    // directly, or predating document indexing - so this list matches what
+    // the folder actually holds, not only what passed through the server.
+    // The Documents page used to be the one screen left behind when the
+    // Drive-merged view was built for the Photos tab; this is what closes
+    // that gap, in one place, for every caller of this route.
+    //
+    // Wrapped so a Drive hiccup narrows the page rather than breaking it.
+    try {
+      const { rows: prows } = await query(
+        'SELECT drive_folder_id FROM patients WHERE id=$1', [pid]);
+      const rootId = prows[0] && prows[0].drive_folder_id;
+      if (rootId) {
+        const drive = await D.getDriveForAdmin(
+          req.user.role === 'admin' ? req.user.id : null);
+        const walked = await D.walkPatientFiles(drive, { rootFolderId: rootId });
+        const known = new Set(docs.map((d) => d.drive_file_id).filter(Boolean));
+
+        // Orphans have no problem/session/tag of their own to match against,
+        // so those filters correctly exclude them rather than showing
+        // something that does not actually belong to the filtered group.
+        const skip = !!(req.query.problem_id || req.query.session_id || tagFilter);
+        let nextId = -1;
+        for (const f of walked) {
+          if (skip || known.has(f.id)) continue;
+          const guess = D.categoryFromFolderName(f.folder);
+          if (req.query.category && cat(req.query.category) !== guess) continue;
+          if (q && !String(f.name || '').toLowerCase().includes(q.toLowerCase())) continue;
+          if (req.query.from && (!f.modified_at || f.modified_at < req.query.from)) continue;
+          if (req.query.to && (!f.modified_at || f.modified_at > req.query.to)) continue;
+          docs.push({
+            // Negative and synthetic: never a real patient_documents row, and
+            // the /:id(\d+) route param can never match a leading '-', so a
+            // stray PATCH/DELETE against one 404s cleanly instead of ever
+            // touching an unrelated real row.
+            id: nextId--,
+            patient_id: pid,
+            session_id: null,
+            problem_id: null,
+            category: guess,
+            title: null,
+            notes: null,
+            doc_date: f.modified_at || null,
+            filename: null,
+            original_name: f.name,
+            mime_type: f.mime_type,
+            size_bytes: f.size_bytes,
+            drive_file_id: f.id,
+            drive_view_link: f.web_view_link,
+            drive_download_link: null,
+            drive_path: null,
+            sync_status: 'synced',
+            sync_error: null,
+            uploaded_by_name: null,
+            created_at: f.modified_at,
+            tags: [],
+            url: null,
+            drive_only: true,
+            drive_thumbnail_link: f.thumbnail_link,
+          });
+        }
+        docs.sort((a, b) =>
+          String(b.doc_date || '').localeCompare(String(a.doc_date || '')));
+      }
+    } catch (e) {
+      console.warn('[documents/list] drive merge skipped:', e.message);
+    }
+
     if (String(req.query.group || '') === 'date') {
       const buckets = [];
       const index = new Map();

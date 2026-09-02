@@ -37,6 +37,8 @@ process.on('uncaughtException', (err) => {
   setTimeout(() => process.exit(1), 5_000).unref();
 });
 
+const { query } = require('./db/pool');
+
 const app = express();
 let server = null;
 
@@ -151,12 +153,32 @@ app.use('/api/reports',    require('./routes/reports'));
 // Health: also reports cache and memory, so "is the cache actually working?"
 // and "how close are we to the 400MB PM2 restart ceiling?" can be answered
 // from a browser rather than by guessing.
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   const mem = process.memoryUsage();
+
+  // Round-trip to the database, measured.
+  //
+  // Postgres is on a REMOTE host, so every query pays network latency that a
+  // local database would not. That is the one honest argument for moving the
+  // data closer - and it is an argument that should be settled with a number,
+  // not a guess. Under ~5ms the database is not your bottleneck; 30ms+ and
+  // it is worth talking about.
+  let dbMs = null;
+  let dbError = null;
+  try {
+    const t0 = process.hrtime.bigint();
+    await query('SELECT 1');
+    dbMs = Number(process.hrtime.bigint() - t0) / 1e6;
+  } catch (e) {
+    dbError = e.message;
+  }
+
   res.json({
     ok: true,
     ts: Date.now(),
     uptime_s: Math.round(process.uptime()),
+    db_ms: dbMs == null ? null : +dbMs.toFixed(1),
+    db_error: dbError,
     memory_mb: {
       rss: +(mem.rss / 1048576).toFixed(1),
       heap: +(mem.heapUsed / 1048576).toFixed(1),
