@@ -177,7 +177,8 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       ? classified.filter((c) => c.status === status)
       : classified;
 
-    const page = filtered.slice(offset, offset + limit);
+    let page = filtered.slice(offset, offset + limit);
+    let filteredTotal = filtered.length;
 
     // ── Reach beyond the base: search each unmatched code AS TEXT ──
     //
@@ -233,11 +234,29 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
           }
         }));
       }
+
+      // A row the search just upgraded no longer belongs in the bucket it
+      // was filtered into a moment ago - pull it back out, and move the
+      // counts with it, so 'Missing' can never show a row that says 'Found
+      // in Drive' right underneath it. filtered.length (below) still counts
+      // it as the OLD status; subtract it here so the "X of Y" on screen
+      // reflects what THIS check just confirmed, not what the cheap pass
+      // guessed before anyone looked.
+      if (status) {
+        const stillMatches = page.filter((r) => r.status === status);
+        const upgraded = page.length - stillMatches.length;
+        if (upgraded > 0) {
+          counts.missing = Math.max(0, counts.missing - upgraded);
+          counts.suggestion += upgraded;
+        }
+        page = stillMatches;
+        filteredTotal -= upgraded;
+      }
     }
 
     res.json({
       patients: page,
-      total: filtered.length,
+      total: Math.max(0, filteredTotal),
       counts,
       base_folder_id: baseId,
       drive_error: driveError,
