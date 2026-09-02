@@ -108,25 +108,25 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
     let folders = [];
     let baseId = null;
     let driveError = null;
+    let drive = null;
     try {
       const settings = await D.getSettings();
-      const drive = await D.getDriveForAdmin(req.user.id);
+      drive = await D.getDriveForAdmin(req.user.id);
       baseId = await D.baseFolderId(drive, settings);
-      // The WHOLE Drive, not the base folder's children. This clinic's real
-      // archive lives in a different tree than the configured base, and a
-      // matcher that never looked outside the base called every one of those
-      // patients "Missing" - the names matched fine; the folders were simply
-      // never in the searched set. 15 pages x 200 covers ~3000 folders,
-      // comfortably above a one-clinic Drive.
-      folders = await D.listFolders(drive, { everywhere: true, maxPages: 15, fresh });
+      // Base children only, for the bulk pass. A drive-wide LISTING was tried
+      // here and made matching WORSE: files.list truncates at maxPages x 200
+      // in name order, this Drive holds more folders than that, and the
+      // alphabetical cutoff silently dropped real patient folders (Match
+      // found fell 60 -> 36 the day it shipped). One parent's children can
+      // always be listed completely; reach beyond the base comes from
+      // per-code SEARCHES on the visible page below, which use Drive's own
+      // index and cannot be truncated by folder count.
+      folders = await D.listFolders(drive, { parentId: baseId || 'root', fresh });
     } catch (e) {
       driveError = e.message;
     }
-    const foldersById = new Map(folders.map((f) => [f.id, f]));
-    const sitsInBase = (folderId) => {
-      const f = foldersById.get(folderId);
-      return !!(f && baseId && (f.parents || []).includes(baseId));
-    };
+    const baseChildIds = new Set(folders.map((f) => f.id));
+    const sitsInBase = (folderId) => baseChildIds.has(folderId);
 
     const classified = patients.map((p) => {
       const inBase = !!(p.drive_folder_id && sitsInBase(p.drive_folder_id));
@@ -140,19 +140,14 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
             const n = D.normalizeFolderName(f.name);
             if (!codeRe.test(n)) continue;
             // The code must match as a whole token; the name only ever adds
-            // confidence on top. An in-base copy outranks an identical match
-            // elsewhere, because linking it needs no move afterwards.
-            let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
-            if (baseId && (f.parents || []).includes(baseId)) score += 5;
+            // confidence on top.
+            const score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
             if (!best || score > best.score) best = { ...f, score };
           }
         }
         if (best) {
-          suggestion = {
-            id: best.id,
-            name: best.name,
-            in_base: !!(baseId && (best.parents || []).includes(baseId)),
-          };
+          // Everything in this pass is a base child by construction.
+          suggestion = { id: best.id, name: best.name, in_base: true };
         }
       }
 
@@ -182,8 +177,66 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       ? classified.filter((c) => c.status === status)
       : classified;
 
+    const page = filtered.slice(offset, offset + limit);
+
+    // ── Reach beyond the base: search each unmatched code AS TEXT ──
+    //
+    // For every still-Missing row on THIS page, ask Drive's search index for
+    // the code and validate the hits with the same whole-token regex used
+    // everywhere else. Bounded work - at most `limit` searches, five in
+    // flight, each cached for a minute - so the cost scales with what is on
+    // screen, not with how many patients the clinic has.
+    //
+    // The counts above come from the cheap pass, so a row upgraded here can
+    // read "Match found" while sitting under the Missing filter. That is the
+    // honest ordering: the count says what the bulk pass knew, the row says
+    // what the search just found.
+    if (drive) {
+      // Drive's `contains` matches word-prefixes, so search the longest
+      // alphanumeric run of the code ('Toc-12565' -> '12565') and let the
+      // regex re-validate the FULL code against each hit's name.
+      const searchTermFor = (code) => {
+        const runs = String(code || '').match(/[a-zA-Z0-9]+/g) || [];
+        runs.sort((a, b) => b.length - a.length);
+        return runs[0] || String(code || '').trim();
+      };
+
+      const todo = page.filter((r) => !r.suggestion && r.status === 'missing');
+      for (let i = 0; i < todo.length; i += 5) {
+        await Promise.all(todo.slice(i, i + 5).map(async (r) => {
+          try {
+            const term = searchTermFor(r.patient_code);
+            if (term.length < 2) return;
+            const hits = await D.listFolders(drive, { q: term, fresh });
+            const codeRe = D.patientCodeRegExp(r.patient_code);
+            if (!codeRe) return;
+            const nameNorm = D.normalizeFolderName(r.full_name);
+            let best = null;
+            for (const f of hits) {
+              const n = D.normalizeFolderName(f.name);
+              if (!codeRe.test(n)) continue;
+              let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
+              if (baseChildIds.has(f.id)) score += 5;
+              if (!best || score > best.score) best = { ...f, score };
+            }
+            if (best) {
+              r.suggestion = {
+                id: best.id,
+                name: best.name,
+                in_base: baseChildIds.has(best.id),
+              };
+              r.status = 'suggestion';
+            }
+          } catch {
+            // One failed search must not sink the page; the row simply stays
+            // Missing until the next look.
+          }
+        }));
+      }
+    }
+
     res.json({
-      patients: filtered.slice(offset, offset + limit),
+      patients: page,
       total: filtered.length,
       counts,
       base_folder_id: baseId,

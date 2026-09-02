@@ -525,6 +525,49 @@ router.get('/:id(\\d+)/content', async (req, res) => {
   }
 });
 
+// GET /api/documents/drive/:fileId/content   — bytes of a Drive-only file
+//
+// The merged list surfaces files that exist ONLY in Drive - no
+// patient_documents row, no local copy, nothing /:id/content could stream.
+// Without this, the app could show their name and Drive's thumbnail but had
+// to hand the doctor off to a browser tab to actually LOOK at one, which is
+// exactly the context switch the in-app viewer exists to avoid.
+//
+// Drive file ids are URL-safe ([A-Za-z0-9_-]), which is what the route
+// pattern admits. Auth comes from the router-level authRequired() above -
+// same bar as every other document byte in this file.
+//
+// Deliberately a pure stream, no local backfill: these files have no
+// document row to hang a filename on, and inventing one as a side effect of
+// LOOKING at a file is how ghost records get made. Adopting a Drive file
+// into the index should be its own explicit action, not a byproduct.
+router.get('/drive/:fileId([A-Za-z0-9_-]+)/content', async (req, res) => {
+  const fileId = req.params.fileId;
+  try {
+    const drive = await D.getDriveForAdmin(
+      req.user.role === 'admin' ? req.user.id : null);
+    const dl = await drive.files.get(
+      { fileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'arraybuffer' });
+    const buf = Buffer.from(dl.data);
+
+    // The caller already knows the mime from the merged listing; trusting
+    // that hint costs nothing and saves a metadata round-trip to Google.
+    const mime = String(req.query.mime || '').trim();
+    if (/^[a-z]+\/[a-z0-9.+-]+$/i.test(mime)) res.type(mime);
+
+    // A Drive file's content at the same id is stable enough for an hour;
+    // re-streaming megabytes from Google on every carousel arrow-press is
+    // not a good use of anyone's quota.
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buf);
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[documents/drive-content]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // DELETE /api/documents/:id — soft delete by default.
 //
 // The Drive copy is deliberately LEFT ALONE unless ?drive=1 is passed: Drive
@@ -541,14 +584,31 @@ router.delete('/:id(\\d+)', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const doc = rows[0];
 
-    if (alsoDrive && doc.drive_file_id) {
-      try {
-        const drive = await D.getDriveForAdmin(
-          req.user.role === 'admin' ? req.user.id : null);
-        await drive.files.delete({ fileId: doc.drive_file_id });
-      } catch (e) {
-        console.warn('[documents/delete] drive delete failed:', e.message);
-      }
+    // ── DRIVE DELETION DISABLED BY OWNER REQUEST (2026-09-03) ────────────
+    //
+    // This was the ONLY place in the entire system that could delete anything
+    // from Google Drive (audited: no bulk path exists; Move re-parents, it
+    // never removes). Drive is the clinic's archive of record, and with the
+    // folder-migration tooling now linking hundreds of real patient folders,
+    // the owner asked for zero deletion capability toward Drive - a Drive
+    // copy is now removable only by hand, in Drive itself.
+    //
+    // Deleting a document in the app still soft-deletes (or purges) the LOCAL
+    // record exactly as before; only the reach into Drive is severed.
+    //
+    // if (alsoDrive && doc.drive_file_id) {
+    //   try {
+    //     const drive = await D.getDriveForAdmin(
+    //       req.user.role === 'admin' ? req.user.id : null);
+    //     await drive.files.delete({ fileId: doc.drive_file_id });
+    //   } catch (e) {
+    //     console.warn('[documents/delete] drive delete failed:', e.message);
+    //   }
+    // }
+    if (alsoDrive) {
+      console.warn(
+        '[documents/delete] drive=1 requested for doc ' + id
+        + ' but Drive deletion is disabled - Drive copy left untouched');
     }
 
     if (purge) {
