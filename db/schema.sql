@@ -548,3 +548,29 @@ ALTER TABLE patients ADD COLUMN IF NOT EXISTS drive_folder_path TEXT;
 
 ALTER TABLE drive_settings
     ADD COLUMN IF NOT EXISTS auto_create_patient_folder BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- ── Document tags ─────────────────────────────────────────
+-- Free-form labels on a document ("pre-op", "left knee", "follow-up"), so a
+-- particular image can be found without opening every thumbnail. Deliberately
+-- not a fixed vocabulary: what a clinic wants to label by differs, and a
+-- closed list would go unused.
+ALTER TABLE patient_documents ADD COLUMN IF NOT EXISTS tags TEXT[];
+CREATE INDEX IF NOT EXISTS idx_patient_documents_tags
+    ON patient_documents USING GIN (tags);
+
+
+
+CREATE TABLE IF NOT EXISTS report_verifications (
+    id                SERIAL PRIMARY KEY,
+    patient_id        INT  NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    period_from       DATE NOT NULL,
+    period_to         DATE NOT NULL,
+    verified_by       INT,             -- doctors.id; kept even if that row goes
+    verified_by_name  TEXT,            -- denormalised so the name survives
+    verified_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (patient_id, period_from, period_to)
+);
+
+-- The report looks these up by period, for every patient at once.
+CREATE INDEX IF NOT EXISTS idx_report_verifications_period
+    ON report_verifications (period_from, period_to);

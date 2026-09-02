@@ -1,3 +1,5 @@
+const fs   = require('fs');
+const path = require('path');
 const express = require('express');
 const multer  = require('multer');
 const { query } = require('../db/pool');
@@ -13,14 +15,21 @@ function isConfigured() {
 
 // GET /api/drive/status  — is Drive connected, and is OAuth env configured?
 router.get('/status', authRequired(), async (_req, res) => {
-  const { rows } = await query(
-    'SELECT admin_id, updated_at FROM drive_tokens LIMIT 1'
-  );
-  res.json({
-    configured: isConfigured(),
-    connected: !!rows.length,
-    info: rows[0] || null,
-  });
+  // Never fails hard: this is the endpoint the UI polls to decide whether to
+  // show "Drive connected", so it has to answer even when the DB is unhappy.
+  try {
+    const { rows } = await query(
+      'SELECT admin_id, updated_at FROM drive_tokens LIMIT 1'
+    );
+    res.json({
+      configured: isConfigured(),
+      connected: !!rows.length,
+      info: rows[0] || null,
+    });
+  } catch (e) {
+    console.error('[drive/status]', e);
+    res.status(500).json({ error: 'Could not read Drive status' });
+  }
 });
 
 // GET /api/drive/info — connected Google account info (email, name)
@@ -210,6 +219,162 @@ function renderPopupPage({ ok, title, detail }) {
   </body></html>`;
 }
 
+// GET /api/drive/reconcile   (admin)
+//
+// Cross-check the patient list against the folders actually sitting in the
+// base folder, and report the three populations that matter:
+//
+//   matched            a patient and a folder that belong together
+//   unmatched_patients a patient with no folder in the base
+//   orphan_folders     a folder with no patient - usually a record the
+//                      clinic has on Drive but never entered into the app,
+//                      which is exactly the list worth working through
+//
+// Read-only: nothing is created, moved or linked here. It answers "how far
+// apart are these two lists" so the admin can decide what to do about it.
+router.get('/reconcile', authRequired(['admin']), async (req, res) => {
+  try {
+    const settings = await D.getSettings();
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const baseId = await D.baseFolderId(drive, settings);
+    if (!baseId) {
+      return res.status(400).json({
+        error: 'No base folder is configured in Admin -> Google Drive.',
+      });
+    }
+    const basePath = await D.folderPath(drive, baseId);
+    // fresh: this report's whole purpose is Drive's CURRENT truth. A cached
+    // listing would have it confidently describe a Drive that stopped
+    // existing up to a minute ago.
+    const folders = await D.listFolders(drive, { parentId: baseId, fresh: true });
+
+    const { rows: patients } = await query(
+      `SELECT id, patient_code, full_name, drive_folder_id
+         FROM patients WHERE deleted_at IS NULL
+        ORDER BY patient_code ASC`);
+
+    // Index folders by id so a linked patient is O(1), and keep a working
+    // copy to strike matches off - whatever survives is an orphan.
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    const unclaimed = new Map(folders.map((f) => [f.id, f]));
+
+    const matched = [];
+    const unmatchedPatients = [];
+
+    for (const p of patients) {
+      // 1. Already linked AND the folder really is in the base.
+      if (p.drive_folder_id && byId.has(p.drive_folder_id)) {
+        const f = byId.get(p.drive_folder_id);
+        unclaimed.delete(f.id);
+        matched.push({
+          id: p.id,
+          patient_code: p.patient_code,
+          full_name: p.full_name,
+          folder_id: f.id,
+          folder_name: f.name,
+          how: 'linked',
+        });
+        continue;
+      }
+
+      // 2. Not linked (or linked elsewhere): does a folder here carry the
+      //    patient's code as a whole token?
+      const codeRe = D.patientCodeRegExp(p.patient_code);
+      const nameNorm = D.normalizeFolderName(p.full_name);
+      let best = null;
+      if (codeRe) {
+        for (const f of unclaimed.values()) {
+          const n = D.normalizeFolderName(f.name);
+          if (!codeRe.test(n)) continue;
+          const alsoName = nameNorm.length > 1 && n.includes(nameNorm);
+          const score = alsoName ? 80 : 50;
+          if (!best || score > best.score) {
+            best = { f, score, how: alsoName ? 'code+name' : 'code' };
+          }
+        }
+      }
+      if (best) {
+        unclaimed.delete(best.f.id);
+        matched.push({
+          id: p.id,
+          patient_code: p.patient_code,
+          full_name: p.full_name,
+          folder_id: best.f.id,
+          folder_name: best.f.name,
+          how: best.how,
+        });
+      } else {
+        unmatchedPatients.push({
+          id: p.id,
+          patient_code: p.patient_code,
+          full_name: p.full_name,
+          linked_elsewhere: !!p.drive_folder_id,
+        });
+      }
+    }
+
+    // Whatever folders are left over. Guess a code and a name out of each so
+    // the admin can create the patient without retyping - a guess only, and
+    // presented as one.
+    const orphans = [...unclaimed.values()].map((f) => {
+      const g = guessCodeAndName(f.name);
+      return { id: f.id, name: f.name, guess_code: g.code, guess_name: g.name };
+    });
+
+    res.json({
+      base_folder_id: baseId,
+      base_folder_path: basePath,
+      summary: {
+        patients: patients.length,
+        matched: matched.length,
+        unmatched_patients: unmatchedPatients.length,
+        folders: folders.length,
+        orphan_folders: orphans.length,
+      },
+      matched,
+      unmatched_patients: unmatchedPatients,
+      orphan_folders: orphans,
+    });
+  } catch (e) {
+    console.error('[drive/reconcile]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Pull a plausible patient code and name out of a folder name.
+//
+// Purely a convenience for pre-filling the "create patient" form, and shown
+// to the admin as a suggestion to correct - clinic folder names are far too
+// varied for this to be trusted:
+//
+//   "A.K Garg 25.06.18 (Toc-7551)"  -> code Toc-7551, name A.K Garg 25.06.18
+//   "P-042 - Asha Rao"              -> code P-042,    name Asha Rao
+//   "Asha Rao - P-042"              -> code P-042,    name Asha Rao
+function guessCodeAndName(raw) {
+  const name = String(raw || '').trim();
+
+  // Bracketed text is nearly always the code in practice.
+  const bracket = name.match(/[([]([^)\]]+)[)\]]\s*$/);
+  if (bracket) {
+    return {
+      code: bracket[1].trim(),
+      name: name.slice(0, bracket.index).trim().replace(/[-_\s]+$/, ''),
+    };
+  }
+
+  // Otherwise split on a dash and take whichever side looks more like a code:
+  // shorter, and containing a digit.
+  const parts = name.split(/\s+[-\u2013\u2014_]\s+/);
+  if (parts.length === 2) {
+    const [a, b] = parts.map((x) => x.trim());
+    const codeish = (x) => /\d/.test(x) && x.length <= 20;
+    if (codeish(a) && !codeish(b)) return { code: a, name: b };
+    if (codeish(b) && !codeish(a)) return { code: b, name: a };
+    return { code: a, name: b };
+  }
+  return { code: '', name };
+}
+
 // ===========================================================
 // Folder browser - pick a real folder out of the user's Drive
 // ===========================================================
@@ -245,6 +410,58 @@ router.get('/folders', authRequired(['admin']), async (req, res) => {
         ? 'Reconnect Google Drive to allow browsing your folders.'
         : e.message,
       needs_reconnect: needsReconnect,
+    });
+  }
+});
+
+// GET /api/drive/folder-info?id=<folder id OR any Drive URL>   (admin)
+//
+// Resolves one folder by id, so the admin can paste a link to somewhere the
+// browser cannot reach by clicking. Browsing starts at My Drive ('root'),
+// but a folder synced from a PC by Drive for Desktop sits in the Computers
+// section under a machine root that is not a child of 'root' - unreachable
+// from the top, yet perfectly usable once its id is known. Shared-drive
+// folders have the same shape.
+router.get('/folder-info', authRequired(['admin']), async (req, res) => {
+  const raw = String(req.query.id || '').trim();
+  if (!raw) return res.status(400).json({ error: 'id required' });
+
+  // Accept a bare id or any of the URL shapes Drive hands out:
+  //   https://drive.google.com/drive/folders/<id>?usp=sharing
+  //   https://drive.google.com/drive/u/0/folders/<id>
+  //   https://drive.google.com/open?id=<id>
+  let id = raw;
+  const m = raw.match(/\/folders\/([A-Za-z0-9_-]+)/)
+    || raw.match(/[?&]id=([A-Za-z0-9_-]+)/);
+  if (m) id = m[1];
+  else if (/^https?:/i.test(raw)) {
+    return res.status(400).json({
+      error: 'That link has no folder id in it. Open the folder in Drive and '
+        + 'copy the address, or use Share -> Copy link.',
+    });
+  }
+
+  try {
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const { data } = await drive.files.get({
+      fileId: id,
+      fields: 'id,name,mimeType,driveId,trashed',
+      supportsAllDrives: true,
+    });
+    if (data.mimeType !== 'application/vnd.google-apps.folder') {
+      return res.status(400).json({ error: 'That link points to a file, not a folder.' });
+    }
+    if (data.trashed) {
+      return res.status(400).json({ error: 'That folder is in the Drive trash.' });
+    }
+    const path = await D.folderPath(drive, data.id);
+    res.json({ id: data.id, name: data.name, path });
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    res.status(/not found|404/i.test(msg) ? 404 : 500).json({
+      error: /not found|404/i.test(msg)
+        ? 'No folder with that id is visible to the connected Google account.'
+        : msg,
     });
   }
 });
@@ -386,7 +603,12 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const drive = await D.getDriveForAdmin(req.user.role === 'admin' ? req.user.id : null);
 
     const stamp = session_date || new Date().toISOString().slice(0, 10);
-    const ext = (file_kind === 'jpg' ? 'jpg' : 'pdf');
+    // png is the default now: the "PDF" was only ever the same PNG wrapped in
+    // an A4 page, and an image previews inline everywhere a PDF does not -
+    // Drive's own grid, the report thumbnails, the in-app viewer, and a
+    // WhatsApp link. pdf and jpg still work for anything that asks for them.
+    const KINDS = { png: 'png', jpg: 'jpg', pdf: 'pdf' };
+    const ext = KINDS[String(file_kind || '').toLowerCase()] || 'png';
 
     // Patient name is only needed for the {name} placeholder; look it up when
     // we have an id, otherwise the template renders it empty.
@@ -409,13 +631,91 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const patientFolderId = folder.id;
     const name = `${stamp}_${patient_code}_treatment.${ext}`;
 
-    const uploaded = await D.uploadFile(drive, {
-      name,
-      mimeType: req.file.mimetype || (ext === 'pdf' ? 'application/pdf' : 'image/jpeg'),
-      buffer: req.file.buffer,
-      parentId: patientFolderId,
-      makePublic: settings.make_links_public !== false,
-    });
+    // Derived from ext, NOT from req.file.mimetype.
+    //
+    // The client uploads through MultipartFile.fromBytes without a content
+    // type, so multer reports application/octet-stream - which was being
+    // stored verbatim. Every later "is this an image?" / "is this a PDF?"
+    // check then failed, which is why treatment records showed no thumbnail
+    // and no preview. We rendered this file ourselves, so we know what it is.
+    const MIMES = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      pdf: 'application/pdf',
+    };
+    const mimeType = MIMES[ext];
+
+    // One treatment record per session, updated in place.
+    //
+    // Every press of Save re-exports the same session, so creating a new
+    // Drive file each time would bury the patient's folder in near-identical
+    // PDFs and leave every previously shared link pointing at a stale one.
+    // Replacing the existing file's content keeps a single current record
+    // and keeps old links live.
+    let existing = null;
+    if (session_id) {
+      const { rows } = await query(
+        `SELECT id, drive_file_id, filename FROM patient_documents
+          WHERE session_id = $1 AND category = 'treatment'
+            AND drive_file_id IS NOT NULL AND deleted_at IS NULL
+          ORDER BY id DESC LIMIT 1`,
+        [+session_id]);
+      if (rows.length) existing = rows[0];
+    }
+
+    let uploaded;
+    if (existing) {
+      try {
+        uploaded = await D.updateFileContent(drive, {
+          fileId: existing.drive_file_id,
+          mimeType,
+          buffer: req.file.buffer,
+          name,
+        });
+      } catch (e) {
+        // The file was deleted or moved out of reach in Drive - fall back to
+        // creating a fresh one rather than failing the save.
+        console.warn('[drive/save-report] update failed, creating new:', e.message);
+        existing = null;
+      }
+    }
+    if (!uploaded) {
+      uploaded = await D.uploadFile(drive, {
+        name,
+        mimeType,
+        buffer: req.file.buffer,
+        parentId: patientFolderId,
+        makePublic: settings.make_links_public !== false,
+      });
+    }
+
+    // Keep a LOCAL copy too, exactly like every other document.
+    //
+    // This route used to hand the buffer straight to Drive and store only a
+    // link, which left patient_documents.filename NULL. Every screen that
+    // renders a document from our own server - thumbnails, the in-app viewer -
+    // then had nothing to show and fell back to "only on Google Drive". It
+    // also meant the clinic's own copy of a treatment record lived solely in
+    // someone's Google account.
+    const DOCS_DIR = path.join(__dirname, '..', 'uploads', 'patient-docs');
+    if (!fs.existsSync(DOCS_DIR)) fs.mkdirSync(DOCS_DIR, { recursive: true });
+    let localName = null;
+    try {
+      // Reuse the row's existing file on a re-save so repeated presses of Save
+      // overwrite one file instead of littering the disk, mirroring what the
+      // Drive side already does.
+      if (existing && existing.filename) {
+        localName = existing.filename;
+      } else {
+        localName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${name}`
+          .replace(/[^a-zA-Z0-9._-]/g, '_');
+      }
+      fs.writeFileSync(path.join(DOCS_DIR, localName), req.file.buffer);
+    } catch (e) {
+      // A disk problem must not lose the Drive upload that already succeeded.
+      console.warn('[drive/save-report] local copy failed:', e.message);
+      localName = null;
+    }
 
     if (patient_id) {
       await query(
@@ -432,26 +732,38 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
         ]
       );
 
-      // Also register it in the unified document list, so a treatment record
-      // shows up on the patient's Documents page next to everything else.
-      // Drive-only (no local copy): the bytes were generated by the client,
-      // which already files its own copy under the reports folder.
+      // Keep the Documents-page row in step with the file.
       try {
+        if (existing) {
+          await query(
+            `UPDATE patient_documents
+                SET drive_view_link=$2, drive_download_link=$3, doc_date=$4,
+                    original_name=$5, size_bytes=$6, sync_status='synced',
+                    sync_error=NULL,
+                    filename=COALESCE($7, filename),
+                    mime_type=$8
+              WHERE id=$1`,
+            [existing.id, uploaded.webViewLink || null,
+             uploaded.webContentLink || null, stamp, name,
+             req.file.size || null, localName, mimeType]);
+          throw { __handled: true };
+        }
         await query(
           `INSERT INTO patient_documents
              (patient_id, session_id, category, title, doc_date,
-              original_name, mime_type, size_bytes,
+              original_name, filename, mime_type, size_bytes,
               drive_file_id, drive_view_link, drive_download_link,
               drive_folder_id, drive_path, sync_status,
               uploaded_by, uploaded_by_name)
-           VALUES ($1,$2,'treatment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'synced',$13,$14)`,
+           VALUES ($1,$2,'treatment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'synced',$14,$15)`,
           [
             +patient_id,
             session_id ? +session_id : null,
             'Treatment record (' + ext.toUpperCase() + ')',
             stamp,
             name,
-            req.file.mimetype || (ext === 'pdf' ? 'application/pdf' : 'image/jpeg'),
+            localName,
+            mimeType,
             req.file.size || null,
             uploaded.id,
             uploaded.webViewLink || null,
@@ -464,7 +776,10 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
         );
       } catch (e) {
         // Never fail the share because the index write failed.
-        console.warn('[drive/save-report] document index failed:', e.message);
+        if (!e || !e.__handled) {
+          console.warn('[drive/save-report] document index failed:',
+            e && e.message);
+        }
       }
     }
 

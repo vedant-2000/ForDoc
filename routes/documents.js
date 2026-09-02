@@ -34,7 +34,8 @@ const DOCS_DIR = path.join(__dirname, '..', 'uploads', 'patient-docs');
 if (!fs.existsSync(DOCS_DIR)) fs.mkdirSync(DOCS_DIR, { recursive: true });
 
 const CATEGORIES = [
-  'xray', 'scan', 'report', 'prescription', 'photo', 'treatment', 'other',
+  'xray', 'scan', 'report', 'prescription', 'photo', 'body', 'treatment',
+  'other',
 ];
 
 const storage = multer.diskStorage({
@@ -68,6 +69,36 @@ function dateOrToday(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : new Date().toISOString().slice(0, 10);
 }
 
+// Accept tags as a JSON array or a comma/semicolon separated string -
+// multipart form fields cannot carry an array, so the clients send text.
+// Trimmed, de-duplicated case-insensitively, blanks dropped, capped.
+function cleanTags(v) {
+  if (v == null || v === '') return null;
+  let list;
+  if (Array.isArray(v)) {
+    list = v;
+  } else {
+    const raw = String(v).trim();
+    if (raw.startsWith('[')) {
+      try { list = JSON.parse(raw); } catch { list = raw.split(/[,;]/); }
+    } else {
+      list = raw.split(/[,;]/);
+    }
+  }
+  const seen = new Set();
+  const out = [];
+  for (const t of (Array.isArray(list) ? list : [])) {
+    const clean = String(t == null ? '' : t).trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+    if (out.length >= 20) break;
+  }
+  return out.length ? out : null;
+}
+
 function withUrls(row) {
   if (!row) return row;
   row.url = row.filename ? `/uploads/patient-docs/${row.filename}` : null;
@@ -78,7 +109,8 @@ const SELECT_COLS = `
   d.id, d.patient_id, d.session_id, d.problem_id, d.category, d.title, d.notes,
   d.doc_date, d.filename, d.original_name, d.mime_type, d.size_bytes,
   d.drive_file_id, d.drive_view_link, d.drive_download_link, d.drive_path,
-  d.sync_status, d.sync_error, d.uploaded_by_name, d.created_at`;
+  d.sync_status, d.sync_error, d.uploaded_by_name, d.created_at,
+  COALESCE(d.tags, ARRAY[]::TEXT[]) AS tags`;
 
 // ─────────────────────────────────────────────────────────────
 // Push one already-saved row's bytes to Drive.
@@ -177,6 +209,21 @@ router.get('/', async (req, res) => {
   if (req.query.session_id) { where.push(`d.session_id = $${n++}`); vals.push(+req.query.session_id); }
   if (req.query.from) { where.push(`d.doc_date >= $${n++}`); vals.push(String(req.query.from)); }
   if (req.query.to) { where.push(`d.doc_date <= $${n++}`); vals.push(String(req.query.to)); }
+  // ?tag=a&tag=b - every tag must be present (AND), which is what narrowing
+  // a search means. Case-insensitive so "Pre-op" finds "pre-op".
+  const tagFilter = cleanTags(
+    Array.isArray(req.query.tag) ? req.query.tag : req.query.tag ? [req.query.tag] : null);
+  if (tagFilter) {
+    where.push(`(SELECT ARRAY(SELECT lower(x) FROM unnest(COALESCE(d.tags, ARRAY[]::TEXT[])) x)) @> $${n++}`);
+    vals.push(tagFilter.map((t) => t.toLowerCase()));
+  }
+  // ?q= - substring over title, notes and the original filename.
+  const q = String(req.query.q || '').trim();
+  if (q) {
+    where.push(`(d.title ILIKE $${n} OR d.notes ILIKE $${n} OR d.original_name ILIKE $${n})`);
+    vals.push('%' + q + '%');
+    n++;
+  }
 
   try {
     const { rows } = await query(
@@ -203,6 +250,27 @@ router.get('/', async (req, res) => {
     res.json({ documents: docs, total: docs.length });
   } catch (e) {
     console.error('[documents/list]', e);
+    res.status(500).json({ error: 'List failed' });
+  }
+});
+
+// GET /api/documents/tags?patient_id= - tags already in use, most used
+// first. Feeds the filter row and the upload dialog's suggestions, so people
+// reuse existing labels instead of inventing a new spelling every time.
+router.get('/tags', async (req, res) => {
+  const pid = +req.query.patient_id;
+  try {
+    const { rows } = await query(
+      `SELECT t AS tag, COUNT(*)::int AS n
+         FROM patient_documents d, unnest(d.tags) t
+        WHERE d.deleted_at IS NULL ${pid ? 'AND d.patient_id = $1' : ''}
+        GROUP BY t
+        ORDER BY n DESC, t ASC
+        LIMIT 100`,
+      pid ? [pid] : []);
+    res.json(rows);
+  } catch (e) {
+    console.error('[documents/tags]', e);
     res.status(500).json({ error: 'List failed' });
   }
 });
@@ -235,8 +303,8 @@ router.post('/', upload.single('file'), async (req, res) => {
       `INSERT INTO patient_documents
          (patient_id, session_id, problem_id, category, title, notes, doc_date,
           filename, original_name, mime_type, size_bytes,
-          uploaded_by, uploaded_by_name, sync_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending')
+          uploaded_by, uploaded_by_name, tags, sync_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'pending')
        RETURNING id`,
       [
         pid,
@@ -252,6 +320,7 @@ router.post('/', upload.single('file'), async (req, res) => {
         req.file.size || null,
         req.user.id || null,
         textOrNull(req.user.username, 120),
+        cleanTags(b.tags),
       ]);
 
     const id = rows[0].id;
@@ -281,6 +350,7 @@ router.patch('/:id(\\d+)', async (req, res) => {
   if ('notes' in b)      { sets.push(`notes = $${n++}`);      vals.push(textOrNull(b.notes, 2000)); }
   if ('doc_date' in b)   { sets.push(`doc_date = $${n++}`);   vals.push(dateOrToday(b.doc_date)); }
   if ('problem_id' in b) { sets.push(`problem_id = $${n++}`); vals.push(b.problem_id ? +b.problem_id : null); }
+  if ('tags' in b)       { sets.push(`tags = $${n++}`);       vals.push(cleanTags(b.tags)); }
   if (!sets.length) return res.json({ ok: true });
 
   try {
@@ -299,12 +369,92 @@ router.patch('/:id(\\d+)', async (req, res) => {
 
 // POST /api/documents/:id/drive-retry — re-attempt a failed Drive push
 router.post('/:id(\\d+)/drive-retry', async (req, res) => {
-  const r = await pushToDrive(+req.params.id,
-    req.user.role === 'admin' ? req.user.id : null);
-  const { rows } = await query(
-    `SELECT ${SELECT_COLS} FROM patient_documents d WHERE d.id=$1`, [+req.params.id]);
-  if (!rows.length) return res.status(404).json({ error: 'Not found' });
-  res.json({ document: withUrls(rows[0]), drive: r });
+  try {
+    const r = await pushToDrive(+req.params.id,
+      req.user.role === 'admin' ? req.user.id : null);
+    const { rows } = await query(
+      `SELECT ${SELECT_COLS} FROM patient_documents d WHERE d.id=$1`, [+req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ document: withUrls(rows[0]), drive: r });
+  } catch (e) {
+    // This endpoint exists precisely because Drive is unreliable, so it is
+    // the last place that should fall over when Drive is unreliable.
+    const err = D.classifyDriveError(e);
+    console.error('[documents/drive-retry]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+// GET /api/documents/:id/content   — the file itself
+//
+// Serves our own copy when there is one. When there is not - treatment records
+// saved before the local copy was restored, for instance - it pulls the file
+// back down from Drive, KEEPS it, and serves that. So a document only ever
+// costs one Drive download no matter how often it is viewed, and after the
+// first view it behaves exactly like any other document.
+//
+// This is what lets the in-app viewer render a PDF that only ever lived in
+// Google Drive, instead of showing "only on Google Drive" and sending the
+// doctor out to a browser tab.
+router.get('/:id(\\d+)/content', async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rows } = await query(
+      `SELECT id, patient_id, filename, original_name, mime_type, drive_file_id
+         FROM patient_documents WHERE id=$1 AND deleted_at IS NULL`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const d = rows[0];
+
+    const sendLocal = (name) => {
+      const abs = path.join(DOCS_DIR, name);
+      if (!fs.existsSync(abs)) return false;
+      if (d.mime_type) res.type(d.mime_type);
+      // Immutable: the filename changes whenever the content does.
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      res.sendFile(abs);
+      return true;
+    };
+
+    if (d.filename && sendLocal(d.filename)) return;
+
+    if (!d.drive_file_id) {
+      return res.status(404).json({
+        error: 'This document has no stored file.',
+        code: 'no_content',
+      });
+    }
+
+    // Not on disk: fetch from Drive once, then keep it.
+    const drive = await D.getDriveForAdmin(
+      req.user && req.user.role === 'admin' ? req.user.id : null);
+    const dl = await drive.files.get(
+      { fileId: d.drive_file_id, alt: 'media', supportsAllDrives: true },
+      { responseType: 'arraybuffer' });
+    const buf = Buffer.from(dl.data);
+
+    let name = d.filename;
+    try {
+      if (!name) {
+        const safe = String(d.original_name || `document-${id}`)
+          .replace(/[^a-zA-Z0-9.\-_]/g, '_').slice(-80);
+        name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safe}`;
+      }
+      fs.writeFileSync(path.join(DOCS_DIR, name), buf);
+      await query(
+        'UPDATE patient_documents SET filename=$2, size_bytes=COALESCE(size_bytes,$3) WHERE id=$1',
+        [id, name, buf.length]);
+    } catch (e) {
+      // Caching is a bonus; serving the bytes is the job.
+      console.warn('[documents/content] could not cache locally:', e.message);
+    }
+
+    if (d.mime_type) res.type(d.mime_type);
+    res.send(buf);
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[documents/content]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
 });
 
 // DELETE /api/documents/:id — soft delete by default.

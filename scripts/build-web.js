@@ -32,10 +32,18 @@ if (target === 'react') {
   fs.cpSync(distDir, publicDir, { recursive: true });
   console.log(`✓ React build copied to ${publicDir}`);
 } else {
-  // Points at the CURRENT desktop app (paint_for_doc), which is what the
-  // Windows build ships. The old flutter_app port is no longer the
-  // source of truth for the web build.
-  const flutterDir = path.join(__dirname, '..', '..', 'paint_for_doc');
+  // flutter_app IS the web app. paint_for_doc is the Windows build and has
+  // diverged from it: the mobile photo capture sheet, the on-device photo
+  // queue, the Photos/Treatments tabs and the Drive gallery are web-only, and
+  // paint_for_doc carries desktop-only screens the browser never needs.
+  //
+  // This used to point at paint_for_doc, which is why backend/public had been
+  // serving a build with none of the mobile work in it. Set BUILD_TARGET=paint
+  // if you ever genuinely want the desktop app's web output instead.
+  const flutterDir = path.join(__dirname, '..', '..',
+    (process.env.BUILD_TARGET || '').toLowerCase() === 'paint'
+      ? 'paint_for_doc'
+      : 'flutter_app');
   const buildDir  = path.join(flutterDir, 'build', 'web');
   if (!fs.existsSync(flutterDir)) {
     console.error(`Flutter folder not found at ${flutterDir}`);

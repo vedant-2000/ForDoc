@@ -12,7 +12,7 @@ that one account. Doctors never sign in to Google themselves.
 Two Google rules shape all of this, and both bite here:
 
 1. **Redirect URIs must be `https://…` or `http://localhost`.**
-   A plain-HTTP IP address like `http://16.171.10.44:4000` **cannot** be
+   A plain-HTTP IP address like `http://localhost:4000` **cannot** be
    registered. So the callback can never land on the server directly unless
    the server gets a domain and a certificate.
 
@@ -29,31 +29,98 @@ Step 3 works around rule 1 without a domain. Step 2 avoids rule 2's trap.
 
 ## Step 1 — Create the OAuth credentials
 
-In the [Google Cloud Console](https://console.cloud.google.com/), signed in as
-**the Drive account you have finalised**:
+Everything happens in the [Google Cloud Console](https://console.cloud.google.com/),
+signed in as **the one Drive account you have finalised**. Sign in as that
+account and no other — whichever account you use here is the Drive that ends
+up holding every patient's documents.
 
-1. Create a project (or pick an existing one), e.g. *Treatment Record*.
-2. **APIs & Services → Library** → search **Google Drive API** → **Enable**.
-3. **APIs & Services → OAuth consent screen**:
-   - **User type**
-     - *Internal* — if the account is a **Google Workspace** account. Pick
-       this. No verification, no warning screen, nothing expires. Done.
-     - *External* — the only option for a personal `@gmail.com` account.
-       Continue below.
-   - App name, your support email, developer contact email.
-   - **Scopes → Add or remove scopes → Manually add**:
-     `https://www.googleapis.com/auth/drive`
-   - **Test users**: add your own Google address.
-4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
-   - Application type: **Web application**
-   - Name: anything.
-   - **Authorised redirect URIs → Add URI**, exactly:
-     ```
-     http://localhost:4000/api/drive/callback
-     ```
-     Nothing else is needed. Google accepts `localhost` over plain HTTP, and
-     Step 3 explains why this works even though the server is elsewhere.
-5. Copy the **Client ID** and **Client secret**.
+> Google renamed these screens in 2025. What used to be *APIs & Services →
+> OAuth consent screen* and *→ Credentials* is now **Google Auth Platform**,
+> split into **Branding**, **Audience**, **Data access** and **Clients**. Both
+> names are given below; the old URLs redirect to the new pages.
+
+### 1.1  Create a project
+
+Top-left project dropdown → **New project** → name it e.g. *Treatment Record*
+→ **Create**. Wait for it to become the selected project (the name shows in
+the top bar).
+
+A project is just a container. One project for this app is right; do not reuse
+an unrelated one.
+
+### 1.2  Enable the Drive API
+
+**APIs & Services → Library** → search **Google Drive API** → open it →
+**Enable**.
+
+Skip this and every call fails later with *"Google Drive API has not been used
+in project … before or it is disabled"*.
+
+### 1.3  Configure the consent screen
+
+**APIs & Services → OAuth consent screen** (new UI: **Google Auth Platform →
+Get started**). Fill in:
+
+- **App name** — what you will see on the consent screen, e.g. *Treatment
+  Record*.
+- **User support email** — pick your own address from the dropdown.
+- **Audience**:
+  - **Internal** — available only if this is a **Google Workspace** account.
+    Choose it if you can: no verification, no warning screen, and nothing
+    expires. You can then skip Step 2 entirely.
+  - **External** — the only choice for a personal `@gmail.com`. Continue, and
+    do not skip Step 2.
+- **Contact information** — your email again.
+- Agree to the policy → **Create**.
+
+### 1.4  Add the Drive scope
+
+**Data access** (old UI: *OAuth consent screen → Scopes*) → **Add or remove
+scopes**. Either filter the list for *Google Drive API* and tick the row whose
+scope is exactly `.../auth/drive`, or use **Manually add scopes** and paste:
+
+```
+https://www.googleapis.com/auth/drive
+```
+
+Then **Update** → **Save**. It will be listed under *Restricted* — that is
+expected, and Step 2 explains what it means for you.
+
+### 1.5  Add yourself as a test user  *(External only)*
+
+**Audience** → **Test users** → **Add users** → your own Google address →
+**Save**. Without this, sign-in is refused outright with *"App has not
+completed the Google verification process"*.
+
+### 1.6  Create the OAuth client
+
+**Clients** (old UI: *APIs & Services → Credentials*) → **Create client**
+(old: *Create credentials → OAuth client ID*):
+
+- **Application type: Web application** — not Desktop, not Android. Desktop
+  clients cannot use the paste-the-URL flow in Step 4.
+- **Name** — anything, e.g. *Treatment Record backend*.
+- **Authorised redirect URIs → Add URI**, exactly this, with no trailing
+  slash:
+  ```
+  http://localhost:4000/api/drive/callback
+  ```
+  Leave *Authorised JavaScript origins* empty — the browser never calls
+  Google directly, the backend does.
+- **Create**.
+
+### 1.7  Copy the two values
+
+A dialog shows them once:
+
+- **Client ID** — looks like `1234567890-a1b2c3….apps.googleusercontent.com`
+- **Client secret** — looks like `GOCSPX-…`
+
+Copy both now. If you lose the secret, open the client again under **Clients**
+and either reveal it or press **Add secret**; you do not have to start over.
+
+Treat the secret like a password: it belongs in `backend/.env` on the server
+and nowhere else — not in the Flutter apps, not in git.
 
 ---
 

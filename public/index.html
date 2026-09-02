@@ -1,46 +1,50 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
   <base href="/">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="description" content="Treatment Plan — chart-based treatment planning for clinics.">
 
-  <!-- iOS meta tags & icons -->
+  <!-- Viewport: prevent zoom shifts around the marker canvas; allow the
+       browser to draw under system UI on modern devices. `viewport-fit=cover`
+       is what makes the CSS env(safe-area-inset-*) values non-zero on iOS
+       so notched devices don't cut off the top bar. -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover, minimum-scale=1, maximum-scale=1, user-scalable=no">
+
+  <!-- Address-bar tint matches the app's paper-cream background so the
+       transition from browser chrome to app content is seamless. -->
+  <meta name="theme-color" content="#2A2A2A"
+        media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#2A2A2A"
+        media="(prefers-color-scheme: dark)">
+
+  <!-- iOS "Add to Home Screen" support. Modern iOS Safari uses these two
+       specific meta tags to launch the site as a full-screen PWA (no
+       Safari chrome) once the user picks "Add to Home Screen" from the
+       share sheet. `apple-touch-icon` is the icon iOS shows on the home
+       screen; without it iOS uses a screenshot of the page. -->
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="Treatment Record">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Treatment Plan">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="icons/Icon-512.png">
 
-  <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
-  <title>Treatment Record</title>
+  <title>Treatment Plan</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- Runtime config: backend renders this from APP_API_BASE (see server.js).
+       Sets window.APP_CONFIG.apiBase BEFORE Dart code loads so config.dart
+       can read it. Cache-busted server-side so a live-server env change
+       takes effect on the very next page reload — no Flutter rebuild. -->
+  <script src="config.js"></script>
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

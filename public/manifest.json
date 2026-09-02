@@ -1,11 +1,11 @@
 {
-    "name": "Treatment Record",
-    "short_name": "Treatment Record",
+    "name": "Treatment Plan",
+    "short_name": "Treatment Plan",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F8F3E8",
+    "theme_color": "#2A2A2A",
+    "description": "Treatment Plan Flutter port",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

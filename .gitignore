@@ -9,3 +9,6 @@ uploads/body-masks/*
 !uploads/body-masks/.gitkeep
 uploads/reports/*
 !uploads/reports/.gitkeep
+
+# Database + upload backups (patient data - never commit)
+backups/

@@ -10,11 +10,16 @@ router.use(authRequired(['admin']));
 
 // GET /api/doctors
 router.get('/', async (_req, res) => {
-  const { rows } = await query(
-    `SELECT id, username, full_name, color, is_active, created_at
-     FROM doctors ORDER BY created_at DESC`
-  );
-  res.json(rows);
+  try {
+    const { rows } = await query(
+      `SELECT id, username, full_name, color, is_active, created_at
+       FROM doctors ORDER BY created_at DESC`
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('[doctors/list]', e);
+    res.status(500).json({ error: 'Could not load doctors' });
+  }
 });
 
 // POST /api/doctors  { username, full_name, password, color? }
@@ -49,14 +54,16 @@ router.patch('/:id', async (req, res) => {
   if (full_name !== undefined) { sets.push(`full_name = $${i++}`); args.push(full_name); }
   if (color     !== undefined) { sets.push(`color = $${i++}`);     args.push(color); }
   if (is_active !== undefined) { sets.push(`is_active = $${i++}`); args.push(!!is_active); }
-  if (password) {
-    const hash = await bcrypt.hash(password, 10);
-    sets.push(`password_hash = $${i++}`);
-    args.push(hash);
-  }
-  if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
-  args.push(id);
   try {
+    if (password) {
+      // Inside the try: bcrypt rejects on absurd input, and an unguarded
+      // rejection here used to kill the process rather than fail the request.
+      const hash = await bcrypt.hash(password, 10);
+      sets.push(`password_hash = $${i++}`);
+      args.push(hash);
+    }
+    if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+    args.push(id);
     const { rows } = await query(
       `UPDATE doctors SET ${sets.join(', ')} WHERE id=$${i}
        RETURNING id, username, full_name, color, is_active, created_at`,

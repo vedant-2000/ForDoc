@@ -83,13 +83,18 @@ router.get('/:id(\\d+)', async (req, res) => {
 
 // GET /api/images   (admin) — list all uploads
 router.get('/', authRequired(['admin']), async (_req, res) => {
-  const { rows } = await query(
-    `SELECT id, filename, original_name, mime_type, width_px, height_px,
-            is_active, blank_mask_filename, created_at
-     FROM body_images ORDER BY created_at DESC`
-  );
-  rows.forEach(withUrls);
-  res.json(rows);
+  try {
+    const { rows } = await query(
+      `SELECT id, filename, original_name, mime_type, width_px, height_px,
+              is_active, blank_mask_filename, created_at
+       FROM body_images ORDER BY created_at DESC`
+    );
+    rows.forEach(withUrls);
+    res.json(rows);
+  } catch (e) {
+    console.error('[images/list]', e);
+    res.status(500).json({ error: 'Could not load body images' });
+  }
 });
 
 // POST /api/images  (admin) — upload + auto-activate
