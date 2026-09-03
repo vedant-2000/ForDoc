@@ -640,6 +640,33 @@ router.post('/:id(\\d+)/drive-folder/link', authRequired(['admin']), async (req,
   }
 });
 
+// POST /api/patients/:id/drive-folder/unlink   (admin)
+//
+// Detach the patient from its Drive folder. The folder itself is left
+// completely alone - this clears the app's record of it, nothing more.
+//
+// The case this exists for: patients linked to folders that live on a Drive
+// account the app no longer has access to. Every Drive call against those
+// ids errors, so Move cannot fix them and the row is stuck reading
+// 'Elsewhere' forever. Unlinking drops the dead reference so the matcher can
+// find the folder that IS reachable and offer to link it.
+//
+// No Drive round-trip on purpose: asking Google about the folder first is
+// exactly what fails for these rows.
+router.post('/:id(\\d+)/drive-folder/unlink', authRequired(['admin']), async (req, res) => {
+  const id = +req.params.id;
+  try {
+    const { rowCount } = await query(
+      'UPDATE patients SET drive_folder_id=NULL, drive_folder_path=NULL WHERE id=$1',
+      [id]);
+    if (!rowCount) return res.status(404).json({ error: 'Patient not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[patients/drive-folder/unlink]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/patients/:id/drive-folder/move   (admin)
 //
 // Move the patient's existing folder into the CURRENT base folder. Used to
