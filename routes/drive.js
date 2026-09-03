@@ -219,6 +219,56 @@ function renderPopupPage({ ok, title, detail }) {
   </body></html>`;
 }
 
+// GET /api/drive/folder-index            (admin)
+//
+// What the whole-Drive folder index currently holds. The index is what lets
+// patient creation and the folder worklist answer from memory instead of
+// waiting on Google, so being able to see its state is the difference
+// between "the app is slow" and "the index is still building".
+router.get('/folder-index', authRequired(['admin']), async (req, res) => {
+  try {
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const inv = D.folderInventoryReady(drive);
+    if (!inv) {
+      // Not built yet - start it, so simply opening this screen warms the
+      // index up for whoever creates the next patient.
+      D.startFolderInventory(drive);
+      return res.json({ ready: false, building: true });
+    }
+    res.json({
+      ready: true,
+      building: false,
+      count: inv.folders.length,
+      complete: inv.complete,
+      age_s: Math.round((Date.now() - inv.fetched_at) / 1000),
+    });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+// POST /api/drive/folder-index/resync     (admin)
+//
+// Re-read every folder name from Drive now, rather than waiting for the
+// index to expire. For after a reorganisation in Drive itself - folders
+// created, renamed or moved outside the app - which the app has no way to
+// notice on its own.
+//
+// Returns immediately: a full enumeration takes longer than a request should
+// live, and making the caller wait for it is exactly the mistake that made
+// the folder worklist time out.
+router.post('/folder-index/resync', authRequired(['admin']), async (req, res) => {
+  try {
+    const drive = await D.getDriveForAdmin(req.user.id);
+    D.startFolderInventory(drive, { fresh: true });
+    res.json({ ok: true, building: true });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // GET /api/drive/find-folder?code=12565            (admin)
 //
 // Answers "why is this patient not matching?" without guessing.
@@ -247,14 +297,36 @@ router.get('/find-folder', authRequired(['admin']), async (req, res) => {
     const drive = await D.getDriveForAdmin(req.user.id);
     const baseId = await D.baseFolderId(drive, settings);
 
-    // Drive's own search: finds the folder at ANY depth, in one call each.
-    // Two searches because Drive has no OR across `name contains` terms, and
-    // a clinic that files by name has folders the code alone will never find.
+    // The whole-Drive folder index, if a previous request has finished
+    // building it. It holds every folder's name, id and parents, which is
+    // all three questions this route asks - so with it in hand nothing here
+    // touches Google at all. Creating a patient used to wait on a dozen
+    // sequential Drive calls for this answer.
+    const inv = D.folderInventoryReady(drive);
+    if (!inv) D.startFolderInventory(drive);
+
     const seenIds = new Set();
     const hits = [];
-    for (const term of [code, name].filter(Boolean)) {
-      for (const f of await D.listFolders(drive, { q: term, fresh: true })) {
+    if (inv) {
+      // Reproduce Drive's `name contains` rather than scanning loosely:
+      // Google matches a term against the START of a name token, so 'Ana'
+      // finds 'Ana Sharma' but not 'Kanan'. Scanning for a bare substring
+      // instead would quietly widen the dialog to folders the live search
+      // never offered.
+      const terms = [code, name].filter(Boolean).map(D.normalizeFolderName);
+      for (const f of inv.folders) {
+        const tokens = D.normalizeFolderName(f.name).split(/[^a-z0-9]+/);
+        if (!terms.some((t) => tokens.some((tok) => tok.startsWith(t)))) continue;
         if (seenIds.add(f.id)) hits.push(f);
+      }
+    } else {
+      // Index still building: the original live searches, unchanged. Two of
+      // them because Drive has no OR across `name contains` terms, and a
+      // clinic that files by name has folders the code alone never finds.
+      for (const term of [code, name].filter(Boolean)) {
+        for (const f of await D.listFolders(drive, { q: term, fresh: true })) {
+          if (seenIds.add(f.id)) hits.push(f);
+        }
       }
     }
 
@@ -279,20 +351,50 @@ router.get('/find-folder', authRequired(['admin']), async (req, res) => {
     const rank = { both: 0, code: 1, name: 2 };
     matched.sort((a, b) => rank[a.matched_on] - rank[b.matched_on]);
 
-    // Direct children of the base, to say whether each hit is reachable.
-    let baseChildren = [];
-    try {
-      baseChildren = await D.listFolders(drive, { parentId: baseId || 'root' });
-    } catch { /* base unreadable - reported as in_base:false below */ }
-    const inBase = new Set(baseChildren.map((f) => f.id));
+    // Whether each hit is reachable from the base. From the index this is a
+    // parent check; without it, the base's children have to be listed.
+    let baseChildCount = 0;
+    let inBase;
+    if (inv) {
+      for (const f of inv.folders) {
+        if ((f.parents || []).includes(baseId)) baseChildCount++;
+      }
+      inBase = (id) => {
+        const f = inv.byId.get(id);
+        return !!(f && (f.parents || []).includes(baseId));
+      };
+    } else {
+      let baseChildren = [];
+      try {
+        baseChildren = await D.listFolders(drive, { parentId: baseId || 'root' });
+      } catch { /* base unreadable - reported as in_base:false below */ }
+      baseChildCount = baseChildren.length;
+      const ids = new Set(baseChildren.map((f) => f.id));
+      inBase = (id) => ids.has(id);
+    }
+
+    // A folder's path, walked through the index instead of one files.get per
+    // ancestor. The walk stops where the index does - at a Drive root, which
+    // is not itself a folder in the listing - which is exactly where
+    // folderPath() stops too, hence the same 'My Drive / ...' prefix.
+    const pathFromIndex = (id) => {
+      const parts = [];
+      let cur = inv.byId.get(id);
+      for (let i = 0; i < 20 && cur; i++) {
+        parts.unshift(cur.name);
+        const parent = (cur.parents || [])[0];
+        cur = parent ? inv.byId.get(parent) : null;
+      }
+      return ['My Drive', ...parts].join(' / ');
+    };
 
     const out = [];
     for (const f of matched.slice(0, 25)) {
       out.push({
         id: f.id,
         name: f.name,
-        path: await D.folderPath(drive, f.id),
-        in_base: inBase.has(f.id),
+        path: inv ? pathFromIndex(f.id) : await D.folderPath(drive, f.id),
+        in_base: inBase(f.id),
         matched_on: f.matched_on,
       });
     }
@@ -301,9 +403,18 @@ router.get('/find-folder', authRequired(['admin']), async (req, res) => {
       code,
       name,
       base_folder_id: baseId,
-      base_folder_path: baseId ? await D.folderPath(drive, baseId) : null,
-      base_child_count: baseChildren.length,
+      // The base's own path comes from the index too, so a cold path cache
+      // cannot reintroduce a round trip on the one request that must be fast.
+      base_folder_path: baseId
+        ? (inv && inv.byId.has(baseId)
+            ? pathFromIndex(baseId)
+            : await D.folderPath(drive, baseId))
+        : null,
+      base_child_count: baseChildCount,
       name_hits: hits.length,
+      // So the caller can say whether this answer came from the index or
+      // from a live search still warming up.
+      from_index: !!inv,
       matches: out,
       // The whole point: says which of the three problems this is.
       verdict: out.length === 0

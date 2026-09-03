@@ -4,12 +4,14 @@ const { authRequired } = require('../middleware/auth');
 const D = require('../utils/drive');
 const cache = require('../utils/cache');
 
-// Per-patient Drive match verdicts, accumulated as the worklist's per-page
-// searches run. 'none' means "searched the whole Drive, nothing carries this
-// code"; an object is the folder that does. 15 minutes: long enough that
-// paging through the whole Missing list sees one consistent world, short
-// enough that a folder created in Drive shows up without a restart. The
-// Reload button (fresh=1) ignores and rewrites these.
+// Per-patient Drive match verdicts, recorded by the per-page searches that
+// run while the folder index is still building. 'none' means "searched the
+// whole Drive, nothing carries this code"; an object is the folder that does.
+//
+// Short-lived on purpose: these are a stopgap for the window before the index
+// lands, and the index outranks them once it does. A resync clears them too,
+// so a remembered 'nothing matches' cannot outlive the folder that now does.
+// The Reload button (fresh=1) ignores and rewrites them.
 const VERDICT_TTL_MS = 15 * 60_000;
 const verdictKey = (code) => `driveMatch:${String(code || '').toLowerCase()}`;
 

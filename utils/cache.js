@@ -17,9 +17,20 @@
 const store = new Map();
 
 // Hard ceiling so a long-lived process can never accumulate keys without
-// bound. Far above the number of distinct folders a clinic has; the sweep
-// normally keeps the map an order of magnitude under this.
-const MAX_ENTRIES = 2000;
+// bound.
+//
+// Sized against a real clinic Drive of ~12,000 folders. The entry that
+// multiplies is `path:` - one per folder whose full path has been resolved -
+// and a bulk migration that links a few hundred patients resolves a path for
+// every one. At 2000 the map started evicting oldest-first mid-migration,
+// which meant re-fetching listings that were still perfectly good.
+//
+// The cost is bounded and small: entries hold a path string or a short
+// listing, so a full map is a couple of megabytes against the 400MB the
+// process is allowed. The whole-Drive folder INDEX is deliberately not in
+// here (see `inventories` in utils/drive.js) precisely so that no amount of
+// this churn can evict it.
+const MAX_ENTRIES = 10000;
 
 /**
  * Drop expired entries, then oldest-first if still over the ceiling.

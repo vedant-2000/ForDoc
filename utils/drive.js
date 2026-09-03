@@ -424,10 +424,16 @@ async function listFolders(drive, opts = {}) {
 // Whole-Drive folder inventory (what the matcher matches against)
 // ===========================================================
 
-// 15 minutes: long enough that paging the whole worklist reads ONE
-// consistent snapshot, short enough that folders created by hand in Drive
-// appear without a restart. Reload (fresh) re-enumerates on demand.
-const INVENTORY_TTL_MS = 15 * 60_000;
+// The index, per Drive account, and whatever build is currently running for
+// it. Deliberately NOT in the TTL cache: that store sweeps oldest-first once
+// it passes MAX_ENTRIES, and an index the owner expects to stand until they
+// resync it must not be evicted to make room for a folder listing.
+//
+// There is no expiry. Re-reading every folder name in a Drive is the owner's
+// call, not a timer's - they press Resync in Admin -> Google Drive when they
+// have reorganised something there. The trade is explicit: a folder created
+// by hand in Drive stays invisible to matching until then.
+const inventories = new Map();   // owner -> { inv, building }
 
 /**
  * EVERY folder in the Drive — id, name, parents — plus an index of the
@@ -440,7 +446,11 @@ const INVENTORY_TTL_MS = 15 * 60_000;
  *    unmatched patient, so the Missing count only converged page by page.
  * Paging files.list to EXHAUSTION (no orderBy, 1000 a page, loop while
  * Google keeps handing back a nextPageToken) removes the truncation, and
- * doing it once per TTL turns every code lookup into a Map hit.
+ * doing it once turns every code lookup into a Map hit.
+ *
+ * Built on demand and kept until the owner resyncs it (Admin -> Google
+ * Drive) or the process restarts - see `inventories` above for why there
+ * is deliberately no timer.
  * `complete` goes false only if the hard cap trips — callers fall back to
  * per-code searches then, so an enormous Drive degrades, never lies.
  *
@@ -494,19 +504,19 @@ async function folderInventoryUncached(drive) {
   return { folders, byToken, byId, complete: !pageToken, fetched_at: Date.now() };
 }
 
+/**
+ * The index, building it and waiting if there is none yet.
+ *
+ * Most callers want folderInventoryReady() instead - waiting on a full
+ * enumeration is what made the folder worklist time out. This exists for the
+ * few that legitimately need the finished article.
+ */
 async function folderInventory(drive, { fresh = false } = {}) {
-  const { build } = inventoryKeys(drive);
-  if (fresh) cache.bust(build);
-  return cache.get(build, INVENTORY_TTL_MS, () => folderInventoryUncached(drive));
-}
-
-function inventoryKeys(drive) {
   const owner = driveOwner(drive);
-  // Two keys, because the cache stores PROMISES: peeking the build key while
-  // it is still running hands back an unresolved promise, which tells a
-  // caller nothing about whether it may use the result NOW. The 'done' key
-  // is written only when the enumeration has actually finished.
-  return { build: `allFolders:${owner}`, done: `allFoldersDone:${owner}` };
+  const slot = inventories.get(owner);
+  if (slot && slot.inv && !fresh) return slot.inv;
+  startFolderInventory(drive, { fresh });
+  return inventories.get(owner).building;
 }
 
 /**
@@ -517,7 +527,8 @@ function inventoryKeys(drive) {
  * too long'. Callers use what is ready and carry on.
  */
 function folderInventoryReady(drive) {
-  return cache.peek(inventoryKeys(drive).done) || null;
+  const slot = inventories.get(driveOwner(drive));
+  return (slot && slot.inv) || null;
 }
 
 /**
@@ -529,22 +540,51 @@ function folderInventoryReady(drive) {
  * process-level net in server.js.
  */
 function startFolderInventory(drive, { fresh = false } = {}) {
-  const { build, done } = inventoryKeys(drive);
-  if (fresh) {
-    cache.bust(build);
-    cache.bust(done);
+  const owner = driveOwner(drive);
+  let slot = inventories.get(owner);
+  if (!slot) {
+    slot = { inv: null, building: null };
+    inventories.set(owner, slot);
   }
-  cache
-    .get(build, INVENTORY_TTL_MS, async () => {
-      const started = Date.now();
-      const inv = await folderInventoryUncached(drive);
-      cache.put(done, INVENTORY_TTL_MS, inv);
-      console.log(`[drive] folder inventory ready: ${inv.folders.length} folders`
+  // Already built and nobody asked for a re-read: nothing to do. This is the
+  // common case now that the index does not expire.
+  if (slot.inv && !fresh) return;
+  // A build already in flight covers every caller waiting on one, so however
+  // many requests arrive meanwhile, Google is enumerated once.
+  if (slot.building) return;
+
+  if (fresh) {
+    // An explicit resync means "re-read the truth", so the per-code verdicts
+    // recorded against the OLD picture must go with it - a remembered
+    // 'nothing in Drive carries this code' would otherwise outlive the folder
+    // that now does.
+    cache.bust('driveMatch:');
+    // The existing index deliberately STAYS until the new one lands. A
+    // resync that fails (Drive down, token expired) must not leave the app
+    // with no index at all - that would turn one failed button press into a
+    // slow worklist and slow patient creation until someone noticed.
+  }
+
+  const started = Date.now();
+  slot.building = folderInventoryUncached(drive)
+    .then((inv) => {
+      slot.inv = inv;
+      console.log(`[drive] folder index ready: ${inv.folders.length} folders`
         + ` in ${((Date.now() - started) / 1000).toFixed(1)}s`
         + (inv.complete ? '' : ' (TRUNCATED at the page cap)'));
       return inv;
     })
-    .catch((e) => console.warn('[drive] folder inventory failed:', e.message));
+    .catch((e) => {
+      // Left un-built rather than remembered as broken, so the next request
+      // genuinely retries.
+      console.warn('[drive] folder index failed:', e.message);
+      throw e;
+    })
+    .finally(() => { slot.building = null; });
+
+  // Nothing awaits this when it is started in the background, and an
+  // unhandled rejection would reach the process-level net in server.js.
+  slot.building.catch(() => {});
 }
 
 /**
