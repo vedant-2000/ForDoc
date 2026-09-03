@@ -146,19 +146,20 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
     const baseChildIds = new Set(folders.map((f) => f.id));
     const sitsInBase = (folderId) => baseChildIds.has(folderId);
 
-    // Every folder name in the Drive, indexed by token (cached ~15 min,
-    // single-flight, so only the first request per window pays the
-    // enumeration). With this in hand the classify pass below matches every
-    // patient against the WHOLE Drive in memory — the counts are exact on
-    // the first response instead of converging as pages are viewed.
+    // Every folder name in the Drive, indexed by token. Used ONLY if a
+    // previous request already finished building it — enumerating a Drive
+    // this size takes longer than a request may live, and awaiting it inline
+    // is exactly what made this screen answer 'the server took too long'.
+    // Otherwise: kick the build off and answer now by the per-code searches
+    // below, which is how this worked before the inventory existed. Within a
+    // minute the inventory lands and every later request is exact and cheap.
     let inv = null;
+    let indexing = false;
     if (drive) {
-      try {
-        inv = await D.folderInventory(drive, { fresh });
-      } catch (e) {
-        // An accelerator, not a dependency: the per-code search walk below
-        // still covers matching if enumeration fails.
-        console.warn('[patients/drive-folders] folder inventory unavailable:', e.message);
+      inv = fresh ? null : D.folderInventoryReady(drive);
+      if (!inv) {
+        D.startFolderInventory(drive, { fresh });
+        indexing = true;
       }
     }
 
@@ -369,6 +370,10 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       counts,
       base_folder_id: baseId,
       drive_error: driveError,
+      // True while the whole-Drive index is still being built. The rows are
+      // usable now; the counts are the best this request could check, and
+      // will be exact once the index lands.
+      drive_indexing: indexing,
     });
   } catch (e) {
     console.error('[patients/drive-folders]', e);

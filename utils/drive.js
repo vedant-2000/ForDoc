@@ -486,9 +486,56 @@ async function folderInventoryUncached(drive) {
 }
 
 async function folderInventory(drive, { fresh = false } = {}) {
-  const key = `allFolders:${driveOwner(drive)}`;
-  if (fresh) cache.bust(key);
-  return cache.get(key, INVENTORY_TTL_MS, () => folderInventoryUncached(drive));
+  const { build } = inventoryKeys(drive);
+  if (fresh) cache.bust(build);
+  return cache.get(build, INVENTORY_TTL_MS, () => folderInventoryUncached(drive));
+}
+
+function inventoryKeys(drive) {
+  const owner = driveOwner(drive);
+  // Two keys, because the cache stores PROMISES: peeking the build key while
+  // it is still running hands back an unresolved promise, which tells a
+  // caller nothing about whether it may use the result NOW. The 'done' key
+  // is written only when the enumeration has actually finished.
+  return { build: `allFolders:${owner}`, done: `allFoldersDone:${owner}` };
+}
+
+/**
+ * The finished inventory, or null when one is not ready. NEVER waits.
+ *
+ * Enumerating a large Drive takes longer than a request is allowed to live -
+ * awaiting it inline is what made the folder worklist answer 'the server took
+ * too long'. Callers use what is ready and carry on.
+ */
+function folderInventoryReady(drive) {
+  return cache.peek(inventoryKeys(drive).done) || null;
+}
+
+/**
+ * Make sure an inventory is being built, and return immediately.
+ *
+ * Single-flighted by the cache, so however many requests arrive while one is
+ * running, Google is enumerated once. The rejection handler is not optional:
+ * nothing awaits this promise, and an unhandled rejection would reach the
+ * process-level net in server.js.
+ */
+function startFolderInventory(drive, { fresh = false } = {}) {
+  const { build, done } = inventoryKeys(drive);
+  if (fresh) {
+    cache.bust(build);
+    cache.bust(done);
+  }
+  cache
+    .get(build, INVENTORY_TTL_MS, async () => {
+      const started = Date.now();
+      const inv = await folderInventoryUncached(drive);
+      cache.put(done, INVENTORY_TTL_MS, inv);
+      console.log(`[drive] folder inventory ready: ${inv.folders.length} folders`
+        + ` in ${((Date.now() - started) / 1000).toFixed(1)}s`
+        + (inv.complete ? '' : ' (TRUNCATED at the page cap)'));
+      return inv;
+    })
+    .catch((e) => console.warn('[drive] folder inventory failed:', e.message));
 }
 
 /**
@@ -1031,6 +1078,8 @@ module.exports = {
   listFolders,
   accessTokenFor,
   folderInventory,
+  folderInventoryReady,
+  startFolderInventory,
   listFiles,
   walkPatientFiles,
   categoryFromFolderName,
