@@ -48,6 +48,14 @@ const FOLDER_TTL_MS = 60_000;
 // built fresh per request, so nothing accumulates.
 const driveOwners = new WeakMap();
 
+// The OAuth client behind each drive handle, for the one job the googleapis
+// wrapper cannot do: fetching a thumbnailLink. Those URLs live on
+// googleusercontent.com and are not covered by the API client, but they DO
+// honour the same bearer token - without it Google answers 403 and the
+// caller cannot tell "no thumbnail exists" from "you didn't authenticate".
+// WeakMap for the same reason as driveOwners: the client is non-extensible.
+const driveAuths = new WeakMap();
+
 /** Cache-key identity for a drive client; 'shared' when unknown. */
 function driveOwner(drive) {
   if (!drive) return 'shared';
@@ -209,6 +217,7 @@ async function getDriveForAdmin(adminId) {
   // Cache keys must be per-account: two admins can see different folders, and
   // one must never be served the other's listing.
   driveOwners.set(drive, ownerId == null ? 'shared' : String(ownerId));
+  driveAuths.set(drive, oAuth);
   return drive;
 }
 
@@ -382,6 +391,21 @@ async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize 
  * Pass `fresh: true` to force a re-read (the reconcile screen does, since its
  * entire job is reporting Drive's current truth).
  */
+/**
+ * A currently-valid access token for this drive handle, refreshing it if the
+ * stored one has expired. Null when the handle has no client (a test fake).
+ */
+async function accessTokenFor(drive) {
+  const auth = driveAuths.get(drive);
+  if (!auth) return null;
+  try {
+    const t = await auth.getAccessToken();
+    return typeof t === 'string' ? t : (t && t.token) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function listFolders(drive, opts = {}) {
   const { parentId = 'root', q = '', fresh = false, everywhere = false } = opts;
   const owner = driveOwner(drive);
@@ -1005,6 +1029,7 @@ module.exports = {
   FULL_SCOPE,
   hasFullScope,
   listFolders,
+  accessTokenFor,
   folderInventory,
   listFiles,
   walkPatientFiles,

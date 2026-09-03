@@ -546,10 +546,16 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/content', async (req, res) => {
   try {
     const drive = await D.getDriveForAdmin(
       req.user.role === 'admin' ? req.user.id : null);
+
+    // STREAMED, not buffered. This used to read the whole file into memory
+    // with responseType 'arraybuffer'; a document grid that fell back to
+    // full-size originals could then hold seventy multi-megabyte photos in
+    // RAM at once and trip pm2's 400MB max_memory_restart, killing every
+    // other request in flight. Piping keeps memory flat no matter how many
+    // files are being read.
     const dl = await drive.files.get(
       { fileId, alt: 'media', supportsAllDrives: true },
-      { responseType: 'arraybuffer' });
-    const buf = Buffer.from(dl.data);
+      { responseType: 'stream' });
 
     // The caller already knows the mime from the merged listing; trusting
     // that hint costs nothing and saves a metadata round-trip to Google.
@@ -560,7 +566,12 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/content', async (req, res) => {
     // re-streaming megabytes from Google on every carousel arrow-press is
     // not a good use of anyone's quota.
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    res.send(buf);
+
+    await new Promise((resolve, reject) => {
+      dl.data.on('error', reject);
+      res.on('close', resolve);
+      dl.data.pipe(res).on('finish', resolve);
+    });
   } catch (e) {
     const err = D.classifyDriveError(e);
     console.error('[documents/drive-content]', err.message);
@@ -599,10 +610,21 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/thumb', async (req, res) => {
       return res.status(404).json({ error: 'No thumbnail', code: 'no_thumbnail' });
     }
 
-    // The link is short-lived and Google-signed; fetch it NOW, server-side.
-    const r = await fetch(link);
+    // Fetch it WITH the access token. thumbnailLink points at
+    // googleusercontent.com, which is not a public CDN: without the bearer
+    // token Google returns 403, which is indistinguishable from "this file
+    // has no thumbnail" unless you know to look. Getting this wrong is what
+    // made every tile fall through to downloading the full original.
+    const token = await D.accessTokenFor(drive);
+    let r = await fetch(link, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    // A minority of links (older files, some shared drives) are plain public
+    // URLs that 401 when handed a token they did not ask for.
+    if (!r.ok && token) r = await fetch(link);
     if (!r.ok) {
-      return res.status(404).json({ error: 'Thumbnail expired', code: 'no_thumbnail' });
+      console.warn('[documents/drive-thumb]', fileId, 'thumbnail fetch', r.status);
+      return res.status(404).json({ error: 'Thumbnail unavailable', code: 'no_thumbnail' });
     }
     const buf = Buffer.from(await r.arrayBuffer());
     res.type(r.headers.get('content-type') || 'image/png');
