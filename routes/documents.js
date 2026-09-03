@@ -306,7 +306,15 @@ router.get('/', async (req, res) => {
       const buckets = [];
       const index = new Map();
       for (const doc of docs) {
-        const key = new Date(doc.doc_date).toISOString().slice(0, 10);
+        // A missing or unparseable date must not throw (new Date(undefined)
+        // .toISOString() raises, taking the whole documents list with it) and
+        // must not silently claim 1970, which is what new Date(null) returns.
+        // Drive files carry whatever modifiedTime Google gave us, which is
+        // not guaranteed to be there at all.
+        const at = doc.doc_date ? new Date(doc.doc_date) : null;
+        const key = at && !Number.isNaN(at.getTime())
+          ? at.toISOString().slice(0, 10)
+          : 'Undated';
         if (!index.has(key)) {
           index.set(key, { date: key, documents: [] });
           buckets.push(index.get(key));

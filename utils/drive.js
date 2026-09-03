@@ -332,7 +332,12 @@ async function saveSettings(patch) {
 /// Child folders of [parentId] ('root' for My Drive), or a name search across
 /// the whole Drive when [q] is given. Trashed folders and shortcuts are left
 /// out; Shared Drives are included so a clinic filing into one can pick it.
-async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize = 200, maxPages = 10, everywhere = false } = {}) {
+// pageSize 1000 is Drive's maximum, and 40 pages is 40,000 folders under one
+// parent - far past any real clinic. The old 200 x 10 = 2000 ceiling silently
+// truncated the base folder's children IN NAME ORDER, which reported folders
+// that were sitting in the base as 'Elsewhere' purely because their name
+// sorted late. Bigger pages are also fewer round trips for the same data.
+async function listFoldersUncached(drive, { parentId = 'root', q = '', pageSize = 1000, maxPages = 40, everywhere = false } = {}) {
   const clauses = [
     "mimeType='application/vnd.google-apps.folder'",
     'trashed=false',
@@ -482,7 +487,11 @@ async function folderInventoryUncached(drive) {
       else byToken.set(t, [f]);
     }
   }
-  return { folders, byToken, complete: !pageToken, fetched_at: Date.now() };
+  // byId answers the other question this screen asks: not "which folder
+  // matches this code" but "does THIS folder sit in the base" - and it
+  // answers it from a listing with no cap, unlike one parent's children.
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  return { folders, byToken, byId, complete: !pageToken, fetched_at: Date.now() };
 }
 
 async function folderInventory(drive, { fresh = false } = {}) {

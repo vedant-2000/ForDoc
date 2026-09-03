@@ -127,25 +127,25 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
     // suggestions, so the screen is usable and says why.
     let folders = [];
     let baseId = null;
+    let basePath = null;
     let driveError = null;
     let drive = null;
     try {
       const settings = await D.getSettings();
       drive = await D.getDriveForAdmin(req.user.id);
       baseId = await D.baseFolderId(drive, settings);
-      // Base children first: this one parent's listing is always complete
-      // and decides in_place vs elsewhere. Reach beyond the base comes from
-      // the whole-Drive folder INVENTORY fetched just below — paged to
-      // exhaustion, unlike the capped name-ordered listing that was tried
-      // here once and silently dropped real folders (Match found fell
-      // 60 -> 36 the day it shipped).
+      // The base folder's children, which decide in_place vs elsewhere.
       folders = await D.listFolders(drive, { parentId: baseId || 'root', fresh });
+      // Logged because a truncated listing is invisible from the outside: it
+      // does not error, it just quietly reports folders that ARE in the base
+      // as living somewhere else.
+      console.log(`[patients/drive-folders] base children: ${folders.length}`);
+      // Which folder "in place" actually means. Without it on screen, a row
+      // sitting in some other tree looks mislabelled rather than misplaced.
+      if (baseId) basePath = await D.folderPath(drive, baseId);
     } catch (e) {
       driveError = e.message;
     }
-    const baseChildIds = new Set(folders.map((f) => f.id));
-    const sitsInBase = (folderId) => baseChildIds.has(folderId);
-
     // Every folder name in the Drive, indexed by token. Used ONLY if a
     // previous request already finished building it — enumerating a Drive
     // this size takes longer than a request may live, and awaiting it inline
@@ -163,10 +163,36 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       }
     }
 
+    const baseChildIds = new Set(folders.map((f) => f.id));
+
+    /**
+     * Does this folder sit directly inside the base folder?
+     *
+     * The inventory answers first when it is ready: it is paged to
+     * exhaustion and carries every folder's parents, so it cannot run out
+     * of rows the way one parent's child listing could. The child listing
+     * stays as the answer while the inventory is still building.
+     */
+    const sitsInBase = (folderId) => {
+      if (!folderId) return false;
+      // byId is guarded rather than assumed: a 500 here takes down the whole
+      // worklist, and an inventory reaching this code without its id index
+      // should degrade to the child listing, not crash the screen.
+      if (inv && inv.byId && baseId) {
+        const f = inv.byId.get(folderId);
+        if (f) return (f.parents || []).includes(baseId);
+      }
+      return baseChildIds.has(folderId);
+    };
+
     const classified = patients.map((p) => {
       const inBase = !!(p.drive_folder_id && sitsInBase(p.drive_folder_id));
       let suggestion = null;
-      if (!inBase && (folders.length || inv)) {
+      // Only patients with NO folder are looking for one. Searching on
+      // behalf of a patient who is already linked finds the folder they are
+      // linked to and offers it back as a fresh suggestion - which is how a
+      // row that had just been linked came back saying 'Link'.
+      if (!inBase && !p.drive_folder_id && (folders.length || inv)) {
         const codeRe = D.patientCodeRegExp(p.patient_code);
         const nameNorm = D.normalizeFolderName(p.full_name);
         let best = null;
@@ -196,7 +222,7 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
               const n = D.normalizeFolderName(f.name);
               if (!codeRe.test(n)) continue;
               let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
-              if (baseChildIds.has(f.id)) score += 5;
+              if (sitsInBase(f.id)) score += 5;
               if (!invBest || score > invBest.score) invBest = { ...f, score };
             }
           }
@@ -204,7 +230,7 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
             suggestion = {
               id: invBest.id,
               name: invBest.name,
-              in_base: baseChildIds.has(invBest.id),
+              in_base: sitsInBase(invBest.id),
             };
           }
         }
@@ -220,17 +246,20 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
             suggestion = {
               id: v.id,
               name: v.name,
-              in_base: baseChildIds.has(v.id),
+              in_base: sitsInBase(v.id),
             };
           }
         }
       }
 
       // One state per row, in the order that decides what to DO about it.
+      // An existing link outranks any suggestion: whatever else we might
+      // have found, this patient already has a folder, and the only thing
+      // left to decide is whether it sits in the base.
       let st;
       if (inBase) st = 'in_place';
-      else if (suggestion) st = 'suggestion';
       else if (p.drive_folder_id) st = 'elsewhere';
+      else if (suggestion) st = 'suggestion';
       else st = 'missing';
 
       return {
@@ -315,7 +344,7 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
               const n = D.normalizeFolderName(f.name);
               if (!codeRe.test(n)) continue;
               let score = (nameNorm.length > 1 && n.includes(nameNorm)) ? 80 : 50;
-              if (baseChildIds.has(f.id)) score += 5;
+              if (sitsInBase(f.id)) score += 5;
               if (!best || score > best.score) best = { ...f, score };
             }
             // Remember the answer either way. The negative verdict is the
@@ -327,7 +356,7 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
               r.suggestion = {
                 id: best.id,
                 name: best.name,
-                in_base: baseChildIds.has(best.id),
+                in_base: sitsInBase(best.id),
               };
               r.status = 'suggestion';
             }
@@ -369,6 +398,7 @@ router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
       has_more: nextOffset < trueFilteredLength,
       counts,
       base_folder_id: baseId,
+      base_folder_path: basePath,
       drive_error: driveError,
       // True while the whole-Drive index is still being built. The rows are
       // usable now; the counts are the best this request could check, and
