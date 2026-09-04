@@ -42687,7 +42687,7 @@ ajn(){var s,r=$.bcU
 if(r!=null)return r
 s=A.bMj("apiBase")
 if(s!=null)return $.bcU=s
-return $.bcU="http://148.113.6.25:4000"},
+return $.bcU="https://treatmentrecord.duckdns.org"},
 bKy(a){switch(a.a){case 0:return B.ur
 case 2:return B.P3
 case 1:return B.P2
@@ -134018,7 +134018,7 @@ s=A.J(new A.ag(B.jY,A.bN2(),s),s.i("af.E"))
 return this.a.d=s},
 $S:0}
 A.aQ2.prototype={
-$1(a){var s=null,r=A.c4(s,B.ah,!0,s,!0,B.O,s,A.c6(),this.b,s,s,s,s,s,2,B.a2y,B.R,!0,s,!0,s,!1,s,B.ai,s,s,s,s,s,s,s,s,1,s,s,!1,"\u2022",s,s,s,s,s,!1,s,s,!1,s,!0,s,B.aj,s,s,s,s,s,s,s,s,s,s,s,s,!0,B.X,s,B.ap,s,s,s,s),q=this.a
+$1(a){var s=null,r=A.c4(s,B.ah,!0,s,!0,B.O,s,A.c6(),this.b,s,s,s,s,s,2,B.a2z,B.R,!0,s,!0,s,!1,s,B.ai,s,s,s,s,s,s,s,s,1,s,s,!1,"\u2022",s,s,s,s,s,!1,s,s,!1,s,!0,s,B.aj,s,s,s,s,s,s,s,s,s,s,s,s,!0,B.X,s,B.ap,s,s,s,s),q=this.a
 return A.eO(A.b([A.cs(B.bx,new A.aQ0(q),s),A.dI(B.Ri,new A.aQ1(q),s)],t.p),r,B.b9V)},
 $S:26}
 A.aQ0.prototype={
@@ -134242,7 +134242,7 @@ return A.l($async$wP,r)},
 Ca(a){var s=null,r=this.c
 if(r==null)return
 r.ak(t.J).f.i3(A.i6(s,s,s,s,s,B.O,s,A.C(a,s,s,s,s,s,s,s,s),s,B.cs,s,s,s,s,s,s,s,s,s,s))},
-J(a){var s,r,q,p=this,o=null,n=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.e,o,o,o,o,o,2,B.a2N,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!1,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),m=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.f,o,o,o,o,o,2,B.a2g,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!1,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),l=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.r,o,o,o,o,o,2,B.a2B,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!0,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),k=t.p,j=A.b([],k)
+J(a){var s,r,q,p=this,o=null,n=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.e,o,o,o,o,o,2,B.a2N,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!1,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),m=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.f,o,o,o,o,o,2,B.a2g,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!1,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),l=A.c4(o,B.ah,!1,o,!0,B.O,o,A.c6(),p.r,o,o,o,o,o,2,B.a2C,B.R,!0,o,!0,o,!1,o,B.ai,o,o,o,o,o,o,o,o,1,o,o,!0,"\u2022",o,o,o,o,o,!1,o,o,!1,o,!0,o,B.aj,o,o,o,o,o,o,o,o,o,o,o,o,!0,B.X,o,B.ap,o,o,o,o),k=t.p,j=A.b([],k)
 for(s=0;s<8;++s){r=B.jY[s]
 q=new A.aH(p.w.k(0,r)?B.aV:B.a5,3,B.V,-1)
 j.push(A.cv(!1,o,!0,A.at(o,o,B.I,o,o,new A.aD(r,o,new A.dj(q,q,q,q),o,o,o,B.c5),o,24,o,o,o,o,24),o,!0,o,o,o,o,o,o,o,o,o,new A.aSJ(p,r),o,o,o,o,o,o,o))}n=A.b([B.b9_,B.ao,n,B.bn,m,B.bn,l,B.ao,B.b8W,B.dh,A.h1(B.bK,j,B.c9,0,6)],k)
@@ -134663,7 +134663,7 @@ s=A.aV(6)
 r=A.cH(B.aY,1)
 q=t.p
 p=A.aq(A.b([B.a_h,A.cv(!1,k,!0,B.Ld,k,!0,k,k,k,k,k,k,k,k,k,new A.aTT(l),k,k,k,k,k,k,k)],q),B.J,B.w,B.D,0)
-o=A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),l.db,k,k,k,k,k,2,B.a2H,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,2,k,k,!1,"\u2022",k,k,k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,B.b5m,!0,B.X,k,B.ap,k,k,k,k)
+o=A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),l.db,k,k,k,k,k,2,B.a2q,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,2,k,k,!1,"\u2022",k,k,k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,B.b5m,!0,B.X,k,B.ap,k,k,k,k)
 n=l.dy
 m=n?k:l.gaw0()
 return A.at(k,A.aw(A.b([p,B.bn,B.b8U,B.ao,o,B.ao,A.aq(A.b([B.a_i,A.dI(A.C(n?"Connecting\u2026":"Connect",k,k,k,k,k,k,k,k),m,k)],q),B.J,B.w,B.D,0)],q),B.aa,B.w,B.D),B.I,k,k,new A.aD(B.bb,k,r,s,k,k,B.W),k,k,k,B.bq,k,k,k)},
@@ -135036,7 +135036,7 @@ s=A.b([A.c4(i,B.ah,!1,i,!0,B.O,i,A.c6(),j.e,i,i,i,i,i,2,A.Be(i,B.eX,i,i,i,i,i,i,
 if(!j.z)s.push(new A.e1(B.eE,i,i,A.xI(B.zo,B.bb_,new A.aTb(j)),i))
 else{r=A.aV(6)
 q=A.cH(B.aY,1)
-p=A.c4(i,B.ah,!1,i,!0,B.O,i,A.c6(),j.y,i,i,i,i,i,2,B.a2E,B.R,!0,i,!0,i,!1,i,B.ai,i,i,i,i,i,i,i,i,1,i,i,!1,"\u2022",i,i,i,new A.aTc(j),i,!1,i,i,!1,i,!0,i,B.aj,i,i,i,i,i,i,i,i,i,i,i,B.vl,!0,B.X,i,B.ap,i,i,i,i)
+p=A.c4(i,B.ah,!1,i,!0,B.O,i,A.c6(),j.y,i,i,i,i,i,2,B.a2F,B.R,!0,i,!0,i,!1,i,B.ai,i,i,i,i,i,i,i,i,1,i,i,!1,"\u2022",i,i,i,new A.aTc(j),i,!1,i,i,!1,i,!0,i,B.aj,i,i,i,i,i,i,i,i,i,i,i,B.vl,!0,B.X,i,B.ap,i,i,i,i)
 o=A.cs(B.b9i,new A.aTd(j),i)
 n=j.Q
 m=n?i:j.gaMh()
@@ -135099,7 +135099,7 @@ $0(){var s=this.a.d
 return B.m.MF(s,this.b+1,s.length)},
 $S:0}
 A.aSX.prototype={
-$1(a){var s=null,r=this.a,q=A.c4(s,B.ah,!0,s,!0,B.O,s,A.c6(),r,s,s,s,s,s,2,B.a2u,B.R,!0,s,!0,s,!1,s,B.ai,s,s,s,s,s,s,s,s,1,s,s,!1,"\u2022",s,s,s,s,s,!1,s,s,!1,s,!0,s,B.aj,s,s,s,s,s,s,s,s,s,s,s,s,!0,B.X,s,B.ap,s,s,s,s)
+$1(a){var s=null,r=this.a,q=A.c4(s,B.ah,!0,s,!0,B.O,s,A.c6(),r,s,s,s,s,s,2,B.a2v,B.R,!0,s,!0,s,!1,s,B.ai,s,s,s,s,s,s,s,s,1,s,s,!1,"\u2022",s,s,s,s,s,!1,s,s,!1,s,!0,s,B.aj,s,s,s,s,s,s,s,s,s,s,s,s,!0,B.X,s,B.ap,s,s,s,s)
 return A.eO(A.b([A.cs(B.bx,new A.aSV(a),s),A.dI(B.vo,new A.aSW(a,r),s)],t.p),q,B.Rg)},
 $S:26}
 A.aSV.prototype={
@@ -135365,9 +135365,9 @@ n=q.w
 if(n!=null)B.m.N(o,A.b([A.C(n,p,p,p,p,B.dQ,p,p,p),B.ao],m))
 o.push(A.c4(p,B.ah,!1,p,!0,B.O,p,A.c6(),q.gPd(),p,p,p,p,p,2,B.a2K,B.R,!0,p,!0,p,!1,p,B.ai,p,p,p,p,p,p,p,p,1,p,p,!1,"\u2022",p,p,p,p,p,!1,p,p,!1,p,!0,p,B.aj,p,p,p,p,p,p,p,p,p,p,p,p,!0,B.X,p,B.ap,p,p,p,p))
 o.push(B.bw)
-o.push(A.c4(p,B.ah,!1,p,!0,B.O,p,A.c6(),q.gRx(),p,p,p,p,p,2,B.a2z,B.R,!0,p,!0,p,!1,p,B.ai,p,p,p,p,p,p,p,p,1,p,p,!1,"\u2022",p,p,p,p,p,!1,p,p,!1,p,!0,p,B.aj,p,p,p,p,p,p,p,p,p,p,p,p,!0,B.X,p,B.ap,p,p,p,p))
+o.push(A.c4(p,B.ah,!1,p,!0,B.O,p,A.c6(),q.gRx(),p,p,p,p,p,2,B.a2A,B.R,!0,p,!0,p,!1,p,B.ai,p,p,p,p,p,p,p,p,1,p,p,!1,"\u2022",p,p,p,p,p,!1,p,p,!1,p,!0,p,B.aj,p,p,p,p,p,p,p,p,p,p,p,p,!0,B.X,p,B.ap,p,p,p,p))
 o.push(B.bw)
-o.push(A.c4(p,B.ah,!1,p,!0,B.O,p,A.c6(),q.f,p,p,p,p,p,2,B.a2v,B.R,!0,p,!0,p,!1,p,B.ai,p,p,p,p,p,p,p,p,1,p,p,!1,"\u2022",p,p,p,p,p,!1,p,p,!1,p,!0,p,B.aj,p,p,p,p,p,p,p,p,p,p,p,p,!0,B.X,p,B.ap,p,p,p,p))
+o.push(A.c4(p,B.ah,!1,p,!0,B.O,p,A.c6(),q.f,p,p,p,p,p,2,B.a2w,B.R,!0,p,!0,p,!1,p,B.ai,p,p,p,p,p,p,p,p,1,p,p,!1,"\u2022",p,p,p,p,p,!1,p,p,!1,p,!0,p,B.aj,p,p,p,p,p,p,p,p,p,p,p,p,!0,B.X,p,B.ap,p,p,p,p))
 o=A.bF(A.aw(o,B.b0,B.w,B.aB),p,420)
 n=q.r
 s=A.cs(B.bx,n?p:new A.aQs(a),p)
@@ -137005,7 +137005,7 @@ o.push(B.bT)
 o.push(A.cv(!1,m,!0,B.Rc,m,!0,m,m,m,m,m,m,m,m,m,new A.b6i(n,r),m,m,m,m,m,m,m))
 s.push(A.at(m,A.aq(o,B.J,B.w,B.aB,0),B.I,m,m,new A.aD(B.E,m,new A.dj(p,p,p,p),new A.cE(q,q,q,q),m,m,B.W),m,m,m,B.yg,m,m,m))}k.push(A.h1(B.bK,s,B.c9,6,6))
 k.push(B.ao)
-k.push(A.aq(A.b([A.aY(A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),n.f,m,m,m,m,m,2,B.a2A,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,new A.b6j(n),m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m),1),B.aP,A.dI(B.vp,n.gaJV(),m)],l),B.J,B.w,B.D,0))
+k.push(A.aq(A.b([A.aY(A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),n.f,m,m,m,m,m,2,B.a2B,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,new A.b6j(n),m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m),1),B.aP,A.dI(B.vp,n.gaJV(),m)],l),B.J,B.w,B.D,0))
 return A.eo(A.f1(new A.a1(B.bq,A.aw(k,B.aa,B.w,B.D),m)),m,B.R,B.bq,m,B.av)},
 a7K(){var s=B.p.aJ(this.f.a.a)
 if(s.length===0)return
@@ -137242,7 +137242,7 @@ p.push(A.dI(B.kP,r?new A.b87(m,j):l,l))
 p=A.aq(p,B.J,B.w,B.D,0)
 o=A.b([],q)
 for(n=0;n<s.length;++n)o.push(m.aKu(j,s,n))
-return A.f1(new A.a1(B.bq,A.aw(A.b([p,B.ao,A.h1(B.bK,o,B.c9,6,6),B.ao,A.aq(A.b([A.aY(A.c4(l,B.ah,!1,l,!0,B.O,l,A.c6(),k,l,l,l,l,l,2,B.a2D,B.R,!0,l,!0,l,!1,l,B.ai,l,l,l,l,l,l,l,l,1,l,l,!1,"\u2022",l,l,l,new A.b88(m,j),l,!1,l,l,!1,l,!0,l,B.aj,l,l,l,l,l,l,l,l,l,l,l,l,!0,B.X,l,B.ap,l,l,l,l),1),B.bT,A.dI(B.vp,new A.b89(m,j),l)],q),B.J,B.w,B.D,0)],q),B.aa,B.w,B.D),l))},
+return A.f1(new A.a1(B.bq,A.aw(A.b([p,B.ao,A.h1(B.bK,o,B.c9,6,6),B.ao,A.aq(A.b([A.aY(A.c4(l,B.ah,!1,l,!0,B.O,l,A.c6(),k,l,l,l,l,l,2,B.a2E,B.R,!0,l,!0,l,!1,l,B.ai,l,l,l,l,l,l,l,l,1,l,l,!1,"\u2022",l,l,l,new A.b88(m,j),l,!1,l,l,!1,l,!0,l,B.aj,l,l,l,l,l,l,l,l,l,l,l,l,!0,B.X,l,B.ap,l,l,l,l),1),B.bT,A.dI(B.vp,new A.b89(m,j),l)],q),B.J,B.w,B.D,0)],q),B.aa,B.w,B.D),l))},
 aKu(a,b,c){var s=null,r=A.aV(99),q=A.cH(B.aY,1),p=A.b([],t.p)
 if(c>0)p.push(A.cv(!1,s,!0,B.b9H,s,!0,s,s,s,s,s,s,s,s,s,new A.b8e(this,b,c),s,s,s,s,s,s,s))
 p.push(A.C(b[c],s,s,s,s,B.fo,s,s,s))
@@ -139767,9 +139767,9 @@ J(a){var s,r,q,p,o,n,m,l,k,j,i=this,h=null,g=A.C(i.a.d==null?"New problem":"Edit
 if(d!=null)e.push(new A.a1(B.qy,A.C(d,h,h,h,h,B.dQ,h,h,h),h))
 e.push(A.c4(h,B.ah,!0,h,!0,B.O,h,A.c6(),i.gSS(),h,h,h,h,h,2,B.a2I,B.R,!0,h,!0,h,!1,h,B.ai,h,h,h,h,h,h,h,h,1,h,h,!1,"\u2022",h,h,h,h,h,!1,h,h,!1,h,!0,h,B.aj,h,h,h,h,h,h,h,h,h,h,h,h,!0,B.X,h,B.ap,h,h,h,h))
 e.push(B.bw)
-e.push(A.c4(h,B.ah,!1,h,!0,B.O,h,A.c6(),i.gGM(),h,h,h,h,h,2,B.a2G,B.R,!0,h,!0,h,!1,h,B.ai,h,h,h,h,h,h,h,h,3,h,h,!1,"\u2022",h,h,h,h,h,!1,h,h,!1,h,!0,h,B.aj,h,h,h,h,h,h,h,h,h,h,h,h,!0,B.X,h,B.ap,h,h,h,h))
+e.push(A.c4(h,B.ah,!1,h,!0,B.O,h,A.c6(),i.gGM(),h,h,h,h,h,2,B.a2H,B.R,!0,h,!0,h,!1,h,B.ai,h,h,h,h,h,h,h,h,3,h,h,!1,"\u2022",h,h,h,h,h,!1,h,h,!1,h,!0,h,B.aj,h,h,h,h,h,h,h,h,h,h,h,h,!0,B.X,h,B.ap,h,h,h,h))
 e.push(B.bw)
-e.push(A.c4(h,B.ah,!1,h,!0,B.O,h,A.c6(),i.gGH(),h,h,h,h,h,2,B.a2s,B.R,!0,h,!0,h,!1,h,B.ai,h,h,h,h,h,h,h,h,1,h,h,!1,"\u2022",h,h,h,h,h,!1,h,h,!1,h,!0,h,B.aj,h,h,h,h,h,h,h,h,h,h,h,h,!0,B.X,h,B.ap,h,h,h,h))
+e.push(A.c4(h,B.ah,!1,h,!0,B.O,h,A.c6(),i.gGH(),h,h,h,h,h,2,B.a2t,B.R,!0,h,!0,h,!1,h,B.ai,h,h,h,h,h,h,h,h,1,h,h,!1,"\u2022",h,h,h,h,h,!1,h,h,!1,h,!0,h,B.aj,h,h,h,h,h,h,h,h,h,h,h,h,!0,B.X,h,B.ap,h,h,h,h))
 e.push(B.ce)
 d=A.b([B.ban],f)
 for(s=["mild","moderate","severe"],r=0;r<3;++r){q=s[r]
@@ -140206,7 +140206,7 @@ r=A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),r,k,k,k,k,k,2,B.eS,B.R,!0,k,!0,k,!1,k,B.ai,k,
 q=A.C("Phone (for WhatsApp)".toUpperCase(),k,k,k,k,B.dj,k,k,k)
 p=l.f
 p===$&&A.a()
-p=A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),p,k,k,k,k,k,2,B.a2t,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,k,k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k)
+p=A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),p,k,k,k,k,k,2,B.a2u,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,k,k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k)
 o=A.C("Notes".toUpperCase(),k,k,k,k,B.dj,k,k,k)
 n=l.r
 n===$&&A.a()
@@ -140635,13 +140635,13 @@ J(a){var s,r,q,p,o,n=this,m=null,l=n.a,k=A.C(l.d==null?"New item":"Edit item",m,
 l=A.C("Category: "+l.c,m,m,m,m,B.bg,m,m,m)
 s=n.d
 s===$&&A.a()
-s=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),s,m,m,m,m,m,2,B.a2F,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
+s=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),s,m,m,m,m,m,2,B.a2G,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
 r=n.e
 r===$&&A.a()
-r=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),r,m,m,m,m,m,2,B.a2r,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
+r=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),r,m,m,m,m,m,2,B.a2s,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
 q=n.f
 q===$&&A.a()
-q=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),q,m,m,m,m,m,2,B.a2q,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
+q=A.c4(m,B.ah,!1,m,!0,B.O,m,A.c6(),q,m,m,m,m,m,2,B.a2r,B.R,!0,m,!0,m,!1,m,B.ai,m,m,m,m,m,m,m,m,1,m,m,!1,"\u2022",m,m,m,m,m,!1,m,m,!1,m,!0,m,B.aj,m,m,m,m,m,m,m,m,m,m,m,m,!0,B.X,m,B.ap,m,m,m,m)
 p=n.r
 p===$&&A.a()
 o=t.p
@@ -141344,7 +141344,7 @@ break
 case 6:case 1:return A.k(q,r)
 case 2:return A.j(o.at(-1),r)}})
 return A.l($async$cW,r)},
-J(a){var s=this,r=null,q=t.p,p=A.b([A.c4(r,B.ah,!0,r,!0,B.O,r,A.c6(),s.d,r,r,r,r,r,2,B.a2x,B.R,!0,r,!0,r,!1,r,B.ai,r,r,r,r,r,r,r,r,1,r,r,!1,"\u2022",r,new A.b2d(s),r,r,r,!1,r,r,!1,r,!0,r,B.aj,r,r,r,r,r,r,r,r,r,r,r,r,!0,B.X,r,B.ap,r,r,r,r),B.ao],q)
+J(a){var s=this,r=null,q=t.p,p=A.b([A.c4(r,B.ah,!0,r,!0,B.O,r,A.c6(),s.d,r,r,r,r,r,2,B.a2y,B.R,!0,r,!0,r,!1,r,B.ai,r,r,r,r,r,r,r,r,1,r,r,!1,"\u2022",r,new A.b2d(s),r,r,r,!1,r,r,!1,r,!0,r,B.aj,r,r,r,r,r,r,r,r,r,r,r,r,!0,B.X,r,B.ap,r,r,r,r),B.ao],q)
 if(s.r)p.push(B.jP)
 p.push(A.aY(A.be7(new A.b2e(s),J.aT(s.e),r),1))
 p=A.bF(A.aw(p,B.J,B.w,B.D),400,400)
@@ -143293,14 +143293,14 @@ e.push(i.wD(r,!0,new A.aXP(i,r)))}if(l.e.length>s.length)e.push(i.wD("\ud83d\udd
 j=A.b([j,h,B.ce,new A.a1(B.jE,g,k),new A.a1(B.en,A.h1(B.bK,e,B.c9,6,6),k)],f)
 if(i.f){h=A.aV(12)
 g=A.cH(B.Xx,1.5)
-e=A.c4(k,B.ah,!0,k,!0,B.O,k,A.c6(),i.e,k,k,k,k,k,2,B.a2C,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,new A.aXU(i),k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k)
+e=A.c4(k,B.ah,!0,k,!0,B.O,k,A.c6(),i.e,k,k,k,k,k,2,B.a2D,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,new A.aXU(i),k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k)
 s=A.b([],f)
 for(r=i.avN(),o=r.length,q=0;q<r.length;r.length===o||(0,A.A)(r),++q){p=r[q]
 n=i.d
 n===$&&A.a()
 s.push(i.wD(p,n.w===p,new A.aXV(i,p)))}j.push(A.at(k,A.aw(A.b([e,B.bn,new A.dw(B.TN,A.eo(new A.a1(B.en,A.h1(B.bK,s,B.c9,6,6),k),k,B.R,k,k,B.av),k),A.aq(A.b([A.cs(B.Rb,new A.aXW(i),k)],f),B.J,B.ir,B.D,0)],f),B.aa,B.w,B.D),B.I,k,k,new A.aD(B.Xb,k,g,h,k,k,B.W),k,k,B.en,B.bQ,k,k,k))}j.push(B.ao)
 j.push(new A.a1(B.jE,A.C("Other (type a treatment not in the list)".toUpperCase(),k,k,k,k,B.dj,k,k,k),k))
-j.push(A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),i.x,k,k,k,k,k,2,B.a2w,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,new A.aXX(i),k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k))
+j.push(A.c4(k,B.ah,!1,k,!0,B.O,k,A.c6(),i.x,k,k,k,k,k,2,B.a2x,B.R,!0,k,!0,k,!1,k,B.ai,k,k,k,k,k,k,k,k,1,k,k,!1,"\u2022",k,new A.aXX(i),k,k,k,!1,k,k,!1,k,!0,k,B.aj,k,k,k,k,k,k,k,k,k,k,k,k,!0,B.X,k,B.ap,k,k,k,k))
 j.push(B.ao)
 j.push(new A.a1(B.jE,A.C("Effectiveness *".toUpperCase(),k,k,k,k,B.dj,k,k,k),k))
 h=A.b([],f)
@@ -149565,25 +149565,25 @@ B.a2n=new A.cF(null,null,null,null,null,null,null,null,null,null,"e.g. Antibioti
 B.eS=new A.cF(null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.a2o=new A.cF(null,null,null,"Unit price \u20b9 *",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.a2p=new A.cF(null,null,null,null,null,null,null,null,null,null,"\ud83d\udd0d Search code or name\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2q=new A.cF(null,null,null,"Unit (tablet, bottle, ml\u2026)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2q=new A.cF(null,null,null,null,null,null,null,null,null,null,"https://treatmentrecord.duckdns.org/api/drive/callback?code=\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,B.eX,!0,null,null,null,null)
+B.a2r=new A.cF(null,null,null,"Unit (tablet, bottle, ml\u2026)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.zG=new A.cF(null,null,null,"Quantity *",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2r=new A.cF(null,null,null,"Code / SKU (optional)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2s=new A.cF(null,null,null,"Noted on (YYYY-MM-DD)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2t=new A.cF(null,null,null,null,null,null,null,null,null,null,"91XXXXXXXXXX",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2u=new A.cF(null,null,null,null,null,null,null,null,null,null,"Folder name",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2v=new A.cF(null,null,null,"Phone (optional)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2w=new A.cF(null,null,null,null,null,null,null,null,null,null,"Custom treatment name",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2x=new A.cF(null,null,null,null,null,null,null,null,null,null,"Code or name\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2y=new A.cF(null,null,null,null,null,null,null,null,null,null,"#RRGGBB",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2z=new A.cF(null,null,null,"Full name",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2A=new A.cF(null,null,null,"New position",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2B=new A.cF(null,null,null,"Password",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2C=new A.cF(null,null,null,null,null,null,null,null,null,null,"Search treatments\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2D=new A.cF(null,null,null,"New treatment",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2E=new A.cF(null,null,null,null,null,null,null,null,null,null,"https://drive.google.com/drive/folders/\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,B.eX,!0,null,null,null,null)
-B.a2F=new A.cF(null,null,null,"Name *",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2G=new A.cF(null,null,null,"Description",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
-B.a2H=new A.cF(null,null,null,null,null,null,null,null,null,null,"http://148.113.6.25:4000/api/drive/callback?code=\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,B.eX,!0,null,null,null,null)
+B.a2s=new A.cF(null,null,null,"Code / SKU (optional)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2t=new A.cF(null,null,null,"Noted on (YYYY-MM-DD)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2u=new A.cF(null,null,null,null,null,null,null,null,null,null,"91XXXXXXXXXX",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2v=new A.cF(null,null,null,null,null,null,null,null,null,null,"Folder name",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2w=new A.cF(null,null,null,"Phone (optional)",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2x=new A.cF(null,null,null,null,null,null,null,null,null,null,"Custom treatment name",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2y=new A.cF(null,null,null,null,null,null,null,null,null,null,"Code or name\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2z=new A.cF(null,null,null,null,null,null,null,null,null,null,"#RRGGBB",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2A=new A.cF(null,null,null,"Full name",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2B=new A.cF(null,null,null,"New position",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2C=new A.cF(null,null,null,"Password",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2D=new A.cF(null,null,null,null,null,null,null,null,null,null,"Search treatments\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2E=new A.cF(null,null,null,"New treatment",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2F=new A.cF(null,null,null,null,null,null,null,null,null,null,"https://drive.google.com/drive/folders/\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,B.eX,!0,null,null,null,null)
+B.a2G=new A.cF(null,null,null,"Name *",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
+B.a2H=new A.cF(null,null,null,"Description",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.a2I=new A.cF(null,null,null,"Title",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.a2J=new A.cF(null,null,null,null,null,null,null,null,null,null,"Free-text note for this mark\u2026",null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
 B.a2K=new A.cF(null,null,null,"Patient code",null,null,null,null,null,null,null,null,null,null,null,null,!0,!0,!1,null,null,null,null,null,null,!0,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,!0,null,null,null,null)
