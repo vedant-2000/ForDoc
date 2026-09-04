@@ -1,7 +1,11 @@
 const jwt = require('jsonwebtoken');
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
-const EXPIRES = process.env.JWT_EXPIRES_IN || '12h';
+// Default deliberately long. This is a clinic terminal that one team uses all
+// day, not a public web app: an unconfigured server logging everyone out twice
+// a day is a support call, not a security win. Shorten it, or set it to
+// 'never', with JWT_EXPIRES_IN in .env.
+const EXPIRES = process.env.JWT_EXPIRES_IN || '30d';
 
 // Setting JWT_EXPIRES_IN to any of these makes sessions permanent: the token
 // is signed WITHOUT an `exp` claim, so it never expires and the user is never

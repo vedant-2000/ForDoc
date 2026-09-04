@@ -388,14 +388,35 @@ router.get('/find-folder', authRequired(['admin']), async (req, res) => {
       return ['My Drive', ...parts].join(' / ');
     };
 
+    const shortlist = matched.slice(0, 25);
+
+    // Who already holds these folders. Without this the dialog cannot tell an
+    // unclaimed folder from another patient's, and picking the wrong one
+    // points two patient records at a single folder - after which every
+    // document either of them uploads lands in the same place.
+    const claimed = new Map();
+    if (shortlist.length) {
+      const { rows: owners } = await query(
+        `SELECT patient_code, full_name, drive_folder_id
+           FROM patients
+          WHERE drive_folder_id = ANY($1) AND deleted_at IS NULL`,
+        [shortlist.map((f) => f.id)]);
+      for (const o of owners) {
+        claimed.set(o.drive_folder_id,
+          { patient_code: o.patient_code, full_name: o.full_name });
+      }
+    }
+
     const out = [];
-    for (const f of matched.slice(0, 25)) {
+    for (const f of shortlist) {
       out.push({
         id: f.id,
         name: f.name,
         path: inv ? pathFromIndex(f.id) : await D.folderPath(drive, f.id),
         in_base: inBase(f.id),
         matched_on: f.matched_on,
+        // null when the folder is free to adopt.
+        linked_to: claimed.get(f.id) || null,
       });
     }
 

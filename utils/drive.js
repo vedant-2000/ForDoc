@@ -241,6 +241,11 @@ async function findOrCreateFolder(drive, name, parentId) {
   // the whole namespace - uploads create category subfolders routinely, and
   // clearing everything each time would keep the cache permanently cold.
   bustFolders(drive, parentId);
+  // A folder the app just made must be findable immediately - otherwise the
+  // next patient with a similar code is offered a 'create' for one that
+  // already exists.
+  noteFolderChanged(drive,
+    { id: created.data.id, name, parents: parentId ? [parentId] : [] });
   return created.data.id;
 }
 
@@ -526,6 +531,39 @@ async function folderInventory(drive, { fresh = false } = {}) {
  * awaiting it inline is what made the folder worklist answer 'the server took
  * too long'. Callers use what is ready and carry on.
  */
+/**
+ * Record a folder the app has just created, renamed or moved.
+ *
+ * The index is otherwise only rebuilt on an explicit resync, which is right
+ * for changes made in Drive - the app cannot know about those. But a change
+ * the app made itself it knows exactly, and leaving it out would let matching
+ * work from a name the folder no longer has.
+ *
+ * Old name tokens are left behind rather than unpicked: a lookup that reaches
+ * this folder through one still re-validates against the CURRENT name, so a
+ * stale token can only cost a rejected candidate, never a wrong match.
+ */
+function noteFolderChanged(drive, { id, name, parents }) {
+  const slot = inventories.get(driveOwner(drive));
+  if (!slot || !slot.inv || !id) return;
+  const inv = slot.inv;
+  let f = inv.byId.get(id);
+  if (!f) {
+    f = { id, name: name || '', parents: parents || [] };
+    inv.folders.push(f);
+    inv.byId.set(id, f);
+  } else {
+    if (name != null) f.name = name;
+    if (parents != null) f.parents = parents;
+  }
+  for (const t of normalizeFolderName(f.name).split(/[^a-z0-9]+/)) {
+    if (t.length < 2) continue;
+    const arr = inv.byToken.get(t);
+    if (!arr) inv.byToken.set(t, [f]);
+    else if (!arr.includes(f)) arr.push(f);
+  }
+}
+
 function folderInventoryReady(drive) {
   const slot = inventories.get(driveOwner(drive));
   return (slot && slot.inv) || null;
@@ -827,6 +865,9 @@ async function moveFolder(drive, folderId, newParentId) {
   for (const p of (cur.parents || [])) bustFolders(drive, p);
   bustFolders(drive, newParentId);
   bustPaths();
+  // The index decides 'In place' from parents, so a move it does not know
+  // about would leave the row reading Elsewhere after a successful Move.
+  noteFolderChanged(drive, { id: cur.id, parents: [newParentId] });
   return { id: cur.id, name: cur.name, moved: true };
 }
 
@@ -1039,6 +1080,9 @@ async function renamePatientFolder(patientId, adminId) {
       requestBody: { name: desired },
       supportsAllDrives: true,
     });
+    // Matching keys on folder names, so the index has to learn the new one
+    // now - not whenever someone next presses Resync.
+    noteFolderChanged(drive, { id: p.drive_folder_id, name: desired });
     // Must come BEFORE folderPath() below, or we read back the pre-rename
     // path and write that stale value into the patient row.
     bustFolders(drive, null);
@@ -1128,6 +1172,7 @@ module.exports = {
   accessTokenFor,
   folderInventory,
   folderInventoryReady,
+  noteFolderChanged,
   startFolderInventory,
   listFiles,
   walkPatientFiles,

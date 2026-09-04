@@ -156,6 +156,13 @@ app.use('/api/reports',    require('./routes/reports'));
 app.get('/api/health', async (_req, res) => {
   const mem = process.memoryUsage();
 
+  // How long a login lasts on THIS server. Without it, "why am I logged out
+  // again?" can only be answered by reading a .env file over SSH - and the
+  // usual cause is that the deployed .env simply never had the setting, so
+  // the code default applied. No secret is exposed: this is the lifetime,
+  // never the signing key.
+  const jwtExpires = process.env.JWT_EXPIRES_IN || '30d (default)';
+
   // Round-trip to the database, measured.
   //
   // Postgres is on a REMOTE host, so every query pays network latency that a
@@ -184,6 +191,9 @@ app.get('/api/health', async (_req, res) => {
       heap: +(mem.heapUsed / 1048576).toFixed(1),
     },
     cache: require('./utils/cache').stats(),
+    // Login lifetime in force on this server, so a logout complaint can be
+    // diagnosed with one curl instead of an SSH session.
+    jwt_expires_in: jwtExpires,
   });
 });
 
