@@ -169,10 +169,18 @@ async function pushToDrive(docId, adminId) {
       makePublic: settings.make_links_public !== false,
     });
 
+    // Erase the temporary local file now that it is safely stored on Drive
+    try {
+      if (fs.existsSync(abs)) fs.unlinkSync(abs);
+    } catch (e) {
+      console.warn('[documents/pushToDrive] could not remove temp file:', e.message);
+    }
+
     await query(
       `UPDATE patient_documents
           SET drive_file_id=$2, drive_view_link=$3, drive_download_link=$4,
               drive_folder_id=$5, drive_path=$6,
+              filename=NULL,
               sync_status='synced', sync_error=NULL
         WHERE id=$1`,
       [docId, uploaded.id, uploaded.webViewLink || null,
@@ -500,7 +508,7 @@ router.get('/:id(\\d+)/content', async (req, res) => {
       });
     }
 
-    // Not on disk: fetch from Drive once, then keep it.
+    // Not on disk: fetch directly from Drive and stream to client
     const drive = await D.getDriveForAdmin(
       req.user && req.user.role === 'admin' ? req.user.id : null);
     const dl = await drive.files.get(
@@ -508,23 +516,8 @@ router.get('/:id(\\d+)/content', async (req, res) => {
       { responseType: 'arraybuffer' });
     const buf = Buffer.from(dl.data);
 
-    let name = d.filename;
-    try {
-      if (!name) {
-        const safe = String(d.original_name || `document-${id}`)
-          .replace(/[^a-zA-Z0-9.\-_]/g, '_').slice(-80);
-        name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safe}`;
-      }
-      fs.writeFileSync(path.join(DOCS_DIR, name), buf);
-      await query(
-        'UPDATE patient_documents SET filename=$2, size_bytes=COALESCE(size_bytes,$3) WHERE id=$1',
-        [id, name, buf.length]);
-    } catch (e) {
-      // Caching is a bonus; serving the bytes is the job.
-      console.warn('[documents/content] could not cache locally:', e.message);
-    }
-
     if (d.mime_type) res.type(d.mime_type);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
     res.send(buf);
   } catch (e) {
     const err = D.classifyDriveError(e);

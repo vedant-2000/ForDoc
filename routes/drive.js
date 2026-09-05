@@ -921,32 +921,15 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
       });
     }
 
-    // Keep a LOCAL copy too, exactly like every other document.
-    //
-    // This route used to hand the buffer straight to Drive and store only a
-    // link, which left patient_documents.filename NULL. Every screen that
-    // renders a document from our own server - thumbnails, the in-app viewer -
-    // then had nothing to show and fell back to "only on Google Drive". It
-    // also meant the clinic's own copy of a treatment record lived solely in
-    // someone's Google account.
+    // Do NOT keep redundant copies on backend disk. Clean up legacy local file if any existed.
     const DOCS_DIR = path.join(__dirname, '..', 'uploads', 'patient-docs');
-    if (!fs.existsSync(DOCS_DIR)) fs.mkdirSync(DOCS_DIR, { recursive: true });
-    let localName = null;
-    try {
-      // Reuse the row's existing file on a re-save so repeated presses of Save
-      // overwrite one file instead of littering the disk, mirroring what the
-      // Drive side already does.
-      if (existing && existing.filename) {
-        localName = existing.filename;
-      } else {
-        localName = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${name}`
-          .replace(/[^a-zA-Z0-9._-]/g, '_');
+    if (existing && existing.filename) {
+      try {
+        const oldPath = path.join(DOCS_DIR, existing.filename);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      } catch (e) {
+        console.warn('[drive/save-report] could not clean up old local file:', e.message);
       }
-      fs.writeFileSync(path.join(DOCS_DIR, localName), req.file.buffer);
-    } catch (e) {
-      // A disk problem must not lose the Drive upload that already succeeded.
-      console.warn('[drive/save-report] local copy failed:', e.message);
-      localName = null;
     }
 
     if (patient_id) {
@@ -972,12 +955,12 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
                 SET drive_view_link=$2, drive_download_link=$3, doc_date=$4,
                     original_name=$5, size_bytes=$6, sync_status='synced',
                     sync_error=NULL,
-                    filename=COALESCE($7, filename),
-                    mime_type=$8
+                    filename=NULL,
+                    mime_type=$7
               WHERE id=$1`,
             [existing.id, uploaded.webViewLink || null,
              uploaded.webContentLink || null, stamp, name,
-             req.file.size || null, localName, mimeType]);
+             req.file.size || null, mimeType]);
           throw { __handled: true };
         }
         await query(
@@ -987,14 +970,13 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
               drive_file_id, drive_view_link, drive_download_link,
               drive_folder_id, drive_path, sync_status,
               uploaded_by, uploaded_by_name)
-           VALUES ($1,$2,'treatment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'synced',$14,$15)`,
+           VALUES ($1,$2,'treatment',$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12,'synced',$13,$14)`,
           [
             +patient_id,
             session_id ? +session_id : null,
             'Treatment record (' + ext.toUpperCase() + ')',
             stamp,
             name,
-            localName,
             mimeType,
             req.file.size || null,
             uploaded.id,

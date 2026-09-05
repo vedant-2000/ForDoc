@@ -77,7 +77,7 @@ All optional. Defaults suit a single clinic box.
 ## 3. Checking it is working
 
 ```bash
-curl https://treatmentrecord.duckdns.org/api/health
+curl http://148.113.6.25:4000/api/health
 ```
 
 ```json
