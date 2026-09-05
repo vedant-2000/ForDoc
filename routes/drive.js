@@ -834,7 +834,8 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const settings = await D.getSettings();
     const drive = await D.getDriveForAdmin(req.user.role === 'admin' ? req.user.id : null);
 
-    const stamp = session_date || new Date().toISOString().slice(0, 10);
+    const stamp = session_date ||
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
     // png is the default now: the "PDF" was only ever the same PNG wrapped in
     // an A4 page, and an image previews inline everywhere a PDF does not -
     // Drive's own grid, the report thumbnails, the in-app viewer, and a
@@ -842,13 +843,21 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const KINDS = { png: 'png', jpg: 'jpg', pdf: 'pdf' };
     const ext = KINDS[String(file_kind || '').toLowerCase()] || 'png';
 
-    // Patient name is only needed for the {name} placeholder; look it up when
-    // we have an id, otherwise the template renders it empty.
+    // Patient name and linked folder id
     let patientName = '';
+    let pFolderId = null;
     if (patient_id) {
       const { rows } = await query(
-        'SELECT full_name FROM patients WHERE id=$1', [+patient_id]);
+        'SELECT full_name, drive_folder_id FROM patients WHERE id=$1', [+patient_id]);
       patientName = (rows[0] && rows[0].full_name) || '';
+      pFolderId = (rows[0] && rows[0].drive_folder_id) || null;
+
+      // If the patient has no linked Drive folder yet, match or create one now and record it
+      if (!pFolderId) {
+        const adminId = req.user.role === 'admin' ? req.user.id : null;
+        const ensured = await D.ensurePatientFolderForId(+patient_id, adminId);
+        pFolderId = (ensured && ensured.id) || null;
+      }
     }
 
     // Same folder resolver every other document uses, so an exported
@@ -859,17 +868,12 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
       patientName,
       category: 'treatment',
       docDate: stamp,
+      patientFolderId: pFolderId,
     });
     const patientFolderId = folder.id;
     const name = `${stamp}_${patient_code}_treatment.${ext}`;
 
     // Derived from ext, NOT from req.file.mimetype.
-    //
-    // The client uploads through MultipartFile.fromBytes without a content
-    // type, so multer reports application/octet-stream - which was being
-    // stored verbatim. Every later "is this an image?" / "is this a PDF?"
-    // check then failed, which is why treatment records showed no thumbnail
-    // and no preview. We rendered this file ourselves, so we know what it is.
     const MIMES = {
       png: 'image/png',
       jpg: 'image/jpeg',
@@ -878,16 +882,10 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const mimeType = MIMES[ext];
 
     // One treatment record per session, updated in place.
-    //
-    // Every press of Save re-exports the same session, so creating a new
-    // Drive file each time would bury the patient's folder in near-identical
-    // PDFs and leave every previously shared link pointing at a stale one.
-    // Replacing the existing file's content keeps a single current record
-    // and keeps old links live.
     let existing = null;
     if (session_id) {
       const { rows } = await query(
-        `SELECT id, drive_file_id, filename FROM patient_documents
+        `SELECT id, drive_file_id, filename, drive_folder_id FROM patient_documents
           WHERE session_id = $1 AND category = 'treatment'
             AND drive_file_id IS NOT NULL AND deleted_at IS NULL
           ORDER BY id DESC LIMIT 1`,
@@ -904,6 +902,27 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
           buffer: req.file.buffer,
           name,
         });
+        // If the patient was re-linked to a new folder, ensure the file moves to the new folder
+        if (patientFolderId && existing.drive_folder_id && existing.drive_folder_id !== patientFolderId) {
+          try {
+            const cur = await drive.files.get({
+              fileId: existing.drive_file_id,
+              fields: 'parents',
+              supportsAllDrives: true,
+            });
+            const prev = (cur.data.parents || []).join(',');
+            if (!(cur.data.parents || []).includes(patientFolderId)) {
+              await drive.files.update({
+                fileId: existing.drive_file_id,
+                addParents: patientFolderId,
+                removeParents: prev || undefined,
+                supportsAllDrives: true,
+              });
+            }
+          } catch (me) {
+            console.warn('[drive/save-report] could not move existing file to new folder:', me.message);
+          }
+        }
       } catch (e) {
         // The file was deleted or moved out of reach in Drive - fall back to
         // creating a fresh one rather than failing the save.
@@ -956,11 +975,13 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
                     original_name=$5, size_bytes=$6, sync_status='synced',
                     sync_error=NULL,
                     filename=NULL,
-                    mime_type=$7
+                    mime_type=$7,
+                    drive_folder_id=$8,
+                    drive_path=$9
               WHERE id=$1`,
             [existing.id, uploaded.webViewLink || null,
              uploaded.webContentLink || null, stamp, name,
-             req.file.size || null, mimeType]);
+             req.file.size || null, mimeType, patientFolderId, folder.path]);
           throw { __handled: true };
         }
         await query(

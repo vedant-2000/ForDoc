@@ -64,9 +64,17 @@ function textOrNull(v, max = 500) {
   return s === '' ? null : s.slice(0, max);
 }
 
-function dateOrToday(v) {
+function dateOrToday(v, filename = '') {
   const s = String(v || '').trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : new Date().toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = String(filename).match(/(\d{4})[-_.](\d{2})[-_.](\d{2})/);
+  if (m) {
+    const y = +m[1], mo = +m[2], d = +m[3];
+    if (y >= 2000 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
 // Accept tags as a JSON array or a comma/semicolon separated string -
@@ -397,7 +405,7 @@ router.post('/', upload.single('file'), async (req, res) => {
         cat(b.category),
         textOrNull(b.title, 200),
         textOrNull(b.notes, 2000),
-        dateOrToday(b.doc_date),
+        dateOrToday(b.doc_date, req.file.originalname),
         req.file.filename,
         textOrNull(req.file.originalname, 200),
         req.file.mimetype || null,
