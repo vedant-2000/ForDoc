@@ -824,11 +824,210 @@ router.post('/settings/preview', authRequired(['admin']), async (req, res) => {
   }
 });
 
+// GET /api/drive/duplicate-folders   (admin)
+//
+// Patients who ended up with TWO folders: the one an admin linked, and a
+// second one the app created from the '{code} - {name}' template before it
+// learned to ask. Treatment records went into whichever one the save path
+// resolved that day, so neither folder is the whole history.
+//
+// Read-only. It reports the split and what is sitting in the stray folder;
+// moving anything is a separate, explicit call.
+router.get('/duplicate-folders', authRequired(['admin']), async (req, res) => {
+  try {
+    const settings = await D.getSettings();
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const baseId = await D.baseFolderId(drive, settings);
+    if (!baseId) {
+      return res.status(400).json({
+        error: 'No base folder is configured in Admin -> Google Drive.',
+      });
+    }
+    // fresh: this screen exists to describe Drive as it is right now, and it
+    // is the screen an admin opens straight after moving things by hand.
+    const folders = await D.listFolders(drive, { parentId: baseId, fresh: true });
+    const byId = new Map(folders.map((f) => [f.id, f]));
+
+    const { rows: patients } = await query(
+      `SELECT id, patient_code, full_name, drive_folder_id, drive_folder_path
+         FROM patients
+        WHERE deleted_at IS NULL AND drive_folder_id IS NOT NULL
+        ORDER BY patient_code ASC`);
+
+    const rows = [];
+    for (const p of patients) {
+      // Whole-token match, the same rule the folder matcher uses: without it
+      // code 'P-1' claims 'P-10' and this screen would offer to merge one
+      // patient's records into another patient's folder.
+      const codeRe = D.patientCodeRegExp(p.patient_code);
+      if (!codeRe) continue;
+      const nameNorm = D.normalizeFolderName(p.full_name);
+
+      const strays = [];
+      for (const f of folders) {
+        if (f.id === p.drive_folder_id) continue;
+        const n = D.normalizeFolderName(f.name);
+        if (!codeRe.test(n)) continue;
+        strays.push({
+          id: f.id,
+          name: f.name,
+          matched_name: nameNorm.length > 1 && n.includes(nameNorm),
+        });
+      }
+      if (!strays.length) continue;
+
+      // Count what is actually in each stray, so nobody has to open Drive to
+      // find out whether a row is worth acting on. An empty stray is just
+      // litter; one with files is a split history.
+      for (const s of strays) {
+        try {
+          // The same walk the patient media view uses - the folder plus one
+          // level of category subfolders, which is exactly how the app files
+          // things, so the count matches what a merge would actually move.
+          const [files, subs] = await Promise.all([
+            D.walkPatientFiles(drive, { rootFolderId: s.id, fresh: true }),
+            D.listFolders(drive, { parentId: s.id, fresh: true }),
+          ]);
+          s.file_count = files.length;
+          s.subfolder_count = subs.length;
+        } catch (e) {
+          s.file_count = null;
+          s.error = e.message;
+        }
+      }
+
+      const linked = byId.get(p.drive_folder_id);
+      rows.push({
+        patient_id: p.id,
+        patient_code: p.patient_code,
+        full_name: p.full_name,
+        linked_folder_id: p.drive_folder_id,
+        linked_folder_name: linked ? linked.name : null,
+        linked_folder_path: p.drive_folder_path || null,
+        // A linked folder outside the base is not an error - the clinic may
+        // keep it anywhere - but it is worth showing, because it explains why
+        // the stray looks like the 'real' one in the base folder listing.
+        linked_in_base: !!linked,
+        strays,
+      });
+    }
+
+    res.json({
+      base_folder_id: baseId,
+      summary: {
+        patients_affected: rows.length,
+        stray_folders: rows.reduce((n, r) => n + r.strays.length, 0),
+        files_to_move: rows.reduce((n, r) => n + r.strays.reduce(
+          (m, s) => m + (s.file_count || 0), 0), 0),
+      },
+      rows,
+    });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[drive/duplicate-folders]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+// POST /api/drive/duplicate-folders/merge   { patient_id, stray_folder_id }
+//
+// Move everything out of one stray folder into the patient's linked folder.
+// Files are re-parented, so ids and shared links survive; see mergeFolderInto.
+//
+// The stray folder itself is left in place, empty. Deleting a folder on a
+// clinic's live Drive is not something this should decide.
+router.post('/duplicate-folders/merge', authRequired(['admin']), async (req, res) => {
+  const { patient_id, stray_folder_id } = req.body || {};
+  if (!patient_id) return res.status(400).json({ error: 'patient_id required' });
+  if (!stray_folder_id) {
+    return res.status(400).json({ error: 'stray_folder_id required' });
+  }
+  try {
+    const { rows } = await query(
+      'SELECT id, patient_code, full_name, drive_folder_id FROM patients WHERE id=$1',
+      [+patient_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Patient not found' });
+    const p = rows[0];
+    if (!p.drive_folder_id) {
+      return res.status(409).json({
+        error: 'This patient has no linked folder to merge into. Link one '
+          + 'under Admin -> Patient folders first.',
+        code: 'patient_folder_not_linked',
+      });
+    }
+    if (p.drive_folder_id === stray_folder_id) {
+      return res.status(400).json({
+        error: 'That IS the linked folder - there is nothing to merge.',
+      });
+    }
+
+    const drive = await D.getDriveForAdmin(req.user.id);
+
+    // Re-check the folder against the patient server-side rather than
+    // trusting the id that came back. A stale screen, a mistyped request or a
+    // half-finished earlier merge must not be able to empty an arbitrary
+    // folder into a patient's history - the damage would be silent and the
+    // files would be indistinguishable from that patient's own.
+    const meta = await drive.files.get({
+      fileId: stray_folder_id,
+      fields: 'id,name,mimeType,trashed',
+      supportsAllDrives: true,
+    });
+    if (meta.data.mimeType !== 'application/vnd.google-apps.folder') {
+      return res.status(400).json({ error: 'That is a file, not a folder.' });
+    }
+    if (meta.data.trashed) {
+      return res.status(400).json({ error: 'That folder is in the trash.' });
+    }
+    const codeRe = D.patientCodeRegExp(p.patient_code);
+    if (!codeRe || !codeRe.test(D.normalizeFolderName(meta.data.name))) {
+      return res.status(400).json({
+        error: `"${meta.data.name}" does not carry patient code ${p.patient_code}, `
+          + 'so it is not this patient\'s stray folder. Refusing to merge it.',
+        code: 'folder_does_not_match_patient',
+      });
+    }
+
+    const report = await D.mergeFolderInto(drive, stray_folder_id, p.drive_folder_id);
+
+    // Say what is left rather than assuming the folder came out empty: a file
+    // that refused to move is exactly what the admin needs to go and look at.
+    //
+    // Counted recursively, and on FILES only. A subfolder that had a twin on
+    // the far side is emptied rather than moved, so its husk stays behind by
+    // design - calling the merge unfinished because of an empty folder would
+    // report failure on every single successful run.
+    const leftFiles = await D.walkPatientFiles(drive, {
+      rootFolderId: stray_folder_id, fresh: true,
+    });
+    const leftFolders = await D.listFolders(drive, { parentId: stray_folder_id, fresh: true });
+
+    res.json({
+      ok: true,
+      merged_into: p.drive_folder_id,
+      stray_folder_id,
+      stray_folder_name: meta.data.name,
+      ...report,
+      remaining_files: leftFiles.length,
+      remaining_folders: leftFolders.length,
+      emptied: leftFiles.length === 0,
+    });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[drive/duplicate-folders/merge]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // POST /api/drive/save-report  multipart: file (pdf/jpg) + patient_code + session_date
 router.post('/save-report', authRequired(), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file required' });
   const { patient_code, patient_id, session_id, session_date, file_kind } = req.body || {};
   if (!patient_code) return res.status(400).json({ error: 'patient_code required' });
+  // Required, not optional. Without it the patient cannot be identified, so
+  // the linked folder cannot be looked up - and the old fallback then filed
+  // the record into a folder built from a blank name. See below.
+  if (!patient_id) return res.status(400).json({ error: 'patient_id required' });
 
   try {
     const settings = await D.getSettings();
@@ -843,21 +1042,33 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     const KINDS = { png: 'png', jpg: 'jpg', pdf: 'pdf' };
     const ext = KINDS[String(file_kind || '').toLowerCase()] || 'png';
 
-    // Patient name and linked folder id
-    let patientName = '';
-    let pFolderId = null;
-    if (patient_id) {
-      const { rows } = await query(
-        'SELECT full_name, drive_folder_id FROM patients WHERE id=$1', [+patient_id]);
-      patientName = (rows[0] && rows[0].full_name) || '';
-      pFolderId = (rows[0] && rows[0].drive_folder_id) || null;
-
-      // If the patient has no linked Drive folder yet, match or create one now and record it
-      if (!pFolderId) {
-        const adminId = req.user.role === 'admin' ? req.user.id : null;
-        const ensured = await D.ensurePatientFolderForId(+patient_id, adminId);
-        pFolderId = (ensured && ensured.id) || null;
-      }
+    // The patient's linked Drive folder is a precondition, not a nicety.
+    //
+    // Resolving one by template instead is what filed treatment records into
+    // a parallel '{code} - {name}' tree beside the folder the clinic actually
+    // keeps that patient's history in. Auto-creating one here only made the
+    // split silent: the record saved, the doctor saw 'Saved to Drive', and
+    // nobody learned the patient was unlinked until someone opened Drive and
+    // found two folders.
+    //
+    // An unlinked patient is a setup question only a human can settle - which
+    // of the clinic's existing folders is this patient's? So ask, once, and
+    // let every later save use the answer.
+    const { rows: prows } = await query(
+      'SELECT full_name, drive_folder_id FROM patients WHERE id=$1', [+patient_id]);
+    if (!prows.length) return res.status(404).json({ error: 'Patient not found' });
+    const patientName = prows[0].full_name || '';
+    const pFolderId = prows[0].drive_folder_id || null;
+    if (!pFolderId) {
+      // 409, not 400: the request itself is fine, the account state is not.
+      // The machine-readable code lets the app offer a Link action rather
+      // than only showing the sentence.
+      return res.status(409).json({
+        error: 'This patient has no Google Drive folder linked yet. Ask an admin '
+          + 'to link one under Admin -> Patient folders, then save again.',
+        code: 'patient_folder_not_linked',
+        patient_id: +patient_id,
+      });
     }
 
     // Same folder resolver every other document uses, so an exported
@@ -885,13 +1096,26 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     let existing = null;
     if (session_id) {
       const { rows } = await query(
-        `SELECT id, drive_file_id, filename, drive_folder_id FROM patient_documents
+        `SELECT id, drive_file_id, filename, drive_folder_id, drive_path
+           FROM patient_documents
           WHERE session_id = $1 AND category = 'treatment'
             AND drive_file_id IS NOT NULL AND deleted_at IS NULL
           ORDER BY id DESC LIMIT 1`,
         [+session_id]);
       if (rows.length) existing = rows[0];
     }
+
+    // Where the file ACTUALLY ends up, which is not always where we asked it
+    // to go. The re-parent below can fail on its own - a permission the
+    // account lost, a folder trashed between the lookup and the move - without
+    // failing the save. The document row has to record the truth: writing the
+    // new folder id when the file never left the old one points the Documents
+    // page at a folder the file is not in, and it also makes the row MATCH,
+    // so the "folders differ" test below never fires again and the move is
+    // never retried. Recording the old id keeps the mismatch visible and lets
+    // the next save retry by itself.
+    let filedFolderId = patientFolderId;
+    let filedPath = folder.path;
 
     let uploaded;
     if (existing) {
@@ -921,6 +1145,8 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
             }
           } catch (me) {
             console.warn('[drive/save-report] could not move existing file to new folder:', me.message);
+            filedFolderId = existing.drive_folder_id;
+            filedPath = existing.drive_path || '';
           }
         }
       } catch (e) {
@@ -931,6 +1157,10 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
       }
     }
     if (!uploaded) {
+      // A fresh file is created straight into the resolved folder, so whatever
+      // the failed update above concluded about its location no longer holds.
+      filedFolderId = patientFolderId;
+      filedPath = folder.path;
       uploaded = await D.uploadFile(drive, {
         name,
         mimeType,
@@ -981,7 +1211,7 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
               WHERE id=$1`,
             [existing.id, uploaded.webViewLink || null,
              uploaded.webContentLink || null, stamp, name,
-             req.file.size || null, mimeType, patientFolderId, folder.path]);
+             req.file.size || null, mimeType, filedFolderId, filedPath]);
           throw { __handled: true };
         }
         await query(
@@ -1003,8 +1233,8 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
             uploaded.id,
             uploaded.webViewLink || null,
             uploaded.webContentLink || null,
-            patientFolderId,
-            folder.path,
+            filedFolderId,
+            filedPath,
             req.user.id || null,
             req.user.username || null,
           ]
@@ -1021,7 +1251,7 @@ router.post('/save-report', authRequired(), upload.single('file'), async (req, r
     res.json({
       ok: true,
       file: uploaded,
-      folder_id: patientFolderId,
+      folder_id: filedFolderId,
       wa_link: buildWhatsAppLink({
         phone: req.body.phone,
         text: `Treatment report for ${patient_code} (${stamp}): ${uploaded.webViewLink || ''}`,

@@ -871,6 +871,105 @@ async function moveFolder(drive, folderId, newParentId) {
   return { id: cur.id, name: cur.name, moved: true };
 }
 
+/// Empty [srcId] into [dstId], leaving srcId itself in place.
+///
+/// Written for one specific mess. A patient's treatment records were filed
+/// into an auto-created '{code} - {name}' folder while the rest of their
+/// history sat in the folder the clinic had linked, so the patient ends up
+/// with two folders and neither one is complete.
+///
+/// Every file is RE-PARENTED, never copied. A moved file keeps its id, so a
+/// link already shared over WhatsApp still opens it and every drive_file_id
+/// in patient_documents stays valid - which is what makes this safe to run on
+/// a Drive the clinic is actively using.
+///
+/// Subfolders are merged BY NAME rather than moved wholesale: both sides
+/// usually have a 'Treatment Records', and moving one into the other would
+/// leave 'Treatment Records/Treatment Records'. A subfolder with no
+/// counterpart on the far side is moved as it stands, contents and all, in a
+/// single call.
+///
+/// Two files that share a name stay as two files. Drive allows it, and
+/// quietly dropping one of two clinical records to tidy up a listing is not a
+/// trade this is allowed to make - the names come back in the report so the
+/// admin can look at them.
+///
+/// [srcId] is never deleted or trashed. Emptying it is the whole job; what
+/// happens to the husk is a decision for a human.
+async function mergeFolderInto(drive, srcId, dstId, { depth = 0 } = {}) {
+  const report = {
+    files_moved: 0,
+    folders_moved: 0,
+    folders_merged: 0,
+    name_clashes: [],
+    errors: [],
+  };
+  // Both guards are real: srcId === dstId would re-parent a folder into
+  // itself, and Drive answers deep recursion with a cycle nobody wants to
+  // debug against a live clinic account.
+  if (!srcId || !dstId || srcId === dstId) return report;
+  if (depth > 8) {
+    report.errors.push('Stopped: folders nested more than 8 deep.');
+    return report;
+  }
+
+  // fresh on the source: a merge that read a cached listing would leave
+  // behind exactly the files that arrived since the cache was filled.
+  const [srcFiles, srcFolders, dstFolders, dstFiles] = await Promise.all([
+    listFiles(drive, { parentId: srcId, fresh: true }),
+    listFolders(drive, { parentId: srcId, fresh: true }),
+    listFolders(drive, { parentId: dstId, fresh: true }),
+    listFiles(drive, { parentId: dstId, fresh: true }),
+  ]);
+
+  const dstFileNames = new Set(dstFiles.map((f) => normalizeFolderName(f.name)));
+  const dstFolderByName = new Map(
+    dstFolders.map((f) => [normalizeFolderName(f.name), f]));
+
+  for (const f of srcFiles) {
+    try {
+      await drive.files.update({
+        fileId: f.id,
+        addParents: dstId,
+        removeParents: srcId,
+        fields: 'id',
+        supportsAllDrives: true,
+      });
+      report.files_moved++;
+      if (dstFileNames.has(normalizeFolderName(f.name))) {
+        report.name_clashes.push(f.name);
+      }
+    } catch (e) {
+      // One unmovable file must not abandon the rest half-done.
+      report.errors.push(`${f.name}: ${e.message}`);
+    }
+  }
+
+  for (const sf of srcFolders) {
+    const twin = dstFolderByName.get(normalizeFolderName(sf.name));
+    try {
+      if (twin) {
+        const sub = await mergeFolderInto(drive, sf.id, twin.id,
+          { depth: depth + 1 });
+        report.files_moved += sub.files_moved;
+        report.folders_moved += sub.folders_moved;
+        report.folders_merged += sub.folders_merged + 1;
+        report.name_clashes.push(...sub.name_clashes);
+        report.errors.push(...sub.errors);
+      } else {
+        await moveFolder(drive, sf.id, dstId);
+        report.folders_moved++;
+      }
+    } catch (e) {
+      report.errors.push(`${sf.name}/: ${e.message}`);
+    }
+  }
+
+  bustFolders(drive, srcId);
+  bustFolders(drive, dstId);
+  return report;
+}
+
 /// The folder that patient folders should sit directly inside, given the
 /// current settings. Creates the base chain if it does not exist yet.
 async function baseFolderId(drive, settings) {
@@ -1200,6 +1299,7 @@ module.exports = {
   patientCodeRegExp,
   findPatientFolder,
   moveFolder,
+  mergeFolderInto,
   baseFolderId,
   ensurePatientFolder,
   ensurePatientFolderForId,

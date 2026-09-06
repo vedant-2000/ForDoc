@@ -113,7 +113,8 @@ router.get('/activity', authRequired(['admin']), async (req, res) => {
     const { rows: docs } = await query(
       `SELECT d.id, d.patient_id, d.category, d.title, d.original_name,
               d.filename, d.mime_type, d.doc_date, d.created_at, d.size_bytes,
-              d.sync_status, d.drive_view_link, d.uploaded_by_name,
+              d.sync_status, d.drive_view_link, d.drive_file_id,
+              d.uploaded_by_name,
               p.patient_code, p.full_name
          FROM patient_documents d
          JOIN patients p ON p.id = d.patient_id
@@ -202,6 +203,10 @@ router.get('/activity', authRequired(['admin']), async (req, res) => {
         size_bytes: d.size_bytes == null ? null : Number(d.size_bytes),
         sync_status: d.sync_status,
         drive_view_link: d.drive_view_link,
+        // Lets the client ask for Drive's own small preview. Without it a
+        // synced document has no url (filename is nulled on upload) and no
+        // way to render anything but an icon.
+        drive_file_id: d.drive_file_id,
         uploaded_by_name: d.uploaded_by_name,
       });
     }
