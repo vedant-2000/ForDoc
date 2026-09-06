@@ -897,7 +897,19 @@ router.get('/duplicate-folders', authRequired(['admin']), async (req, res) => {
       }
 
       const linked = byId.get(p.drive_folder_id);
+      let linkedFileCount = null;
+      try {
+        const lf = await D.walkPatientFiles(drive, {
+          rootFolderId: p.drive_folder_id, fresh: true,
+        });
+        linkedFileCount = lf.length;
+      } catch (e) {
+        // A linked folder we cannot read is worth showing as unknown rather
+        // than as zero - zero would argue for merging INTO it.
+        linkedFileCount = null;
+      }
       rows.push({
+        linked_file_count: linkedFileCount,
         patient_id: p.id,
         patient_code: p.patient_code,
         full_name: p.full_name,
