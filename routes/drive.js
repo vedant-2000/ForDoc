@@ -1036,6 +1036,95 @@ router.post('/duplicate-folders/merge', authRequired(['admin'], { screen: 'split
   }
 });
 
+// POST /api/drive/duplicate-folders/trash   { patient_id, stray_folder_id }
+//
+// Send one EMPTY stray folder to the Drive trash, once its contents have been
+// merged into the patient's real folder.
+//
+// Trashed, never permanently deleted: Drive keeps a trashed folder for 30
+// days and the clinic can restore it themselves. Nothing in this app should
+// be able to destroy something on the clinic's Drive outright.
+//
+// Refuses unless every one of these holds, because the cost of getting it
+// wrong is somebody's clinical history:
+//
+//   • the patient exists and has a linked folder;
+//   • the target is NOT that linked folder;
+//   • the target is a folder, and not already trashed;
+//   • its name carries the patient's code as a whole token - the same rule
+//     the merge uses, so a stale screen cannot trash an unrelated folder;
+//   • it contains NO files anywhere inside it.
+//
+// The emptiness test is done here, at the moment of deletion, rather than
+// trusted from whatever the screen last saw. A folder that filled up since
+// the last scan must not be thrown away on the strength of a stale listing.
+router.post('/duplicate-folders/trash', authRequired(['admin'], { screen: 'split_folders' }), async (req, res) => {
+  const { patient_id, stray_folder_id } = req.body || {};
+  if (!patient_id) return res.status(400).json({ error: 'patient_id required' });
+  if (!stray_folder_id) {
+    return res.status(400).json({ error: 'stray_folder_id required' });
+  }
+  try {
+    const { rows } = await query(
+      'SELECT id, patient_code, full_name, drive_folder_id FROM patients WHERE id=$1',
+      [+patient_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Patient not found' });
+    const p = rows[0];
+    if (p.drive_folder_id === stray_folder_id) {
+      return res.status(400).json({
+        error: 'That is the patient\'s linked folder. Refusing to trash it.',
+        code: 'refuses_linked_folder',
+      });
+    }
+
+    const drive = await D.getDriveForAdmin(req.user.id);
+    const meta = await drive.files.get({
+      fileId: stray_folder_id,
+      fields: 'id,name,mimeType,trashed',
+      supportsAllDrives: true,
+    });
+    if (meta.data.mimeType !== 'application/vnd.google-apps.folder') {
+      return res.status(400).json({ error: 'That is a file, not a folder.' });
+    }
+    if (meta.data.trashed) return res.json({ ok: true, already: true });
+
+    const codeRe = D.patientCodeRegExp(p.patient_code);
+    if (!codeRe || !codeRe.test(D.normalizeFolderName(meta.data.name))) {
+      return res.status(400).json({
+        error: `"${meta.data.name}" does not carry patient code ${p.patient_code}, `
+          + 'so it is not this patient\'s stray folder. Refusing to trash it.',
+        code: 'folder_does_not_match_patient',
+      });
+    }
+
+    // Checked now, not trusted from the screen.
+    const left = await D.walkPatientFiles(drive, {
+      rootFolderId: stray_folder_id, fresh: true,
+    });
+    if (left.length) {
+      return res.status(409).json({
+        error: `That folder still holds ${left.length} file(s). Merge it first.`,
+        code: 'folder_not_empty',
+        remaining_files: left.length,
+      });
+    }
+
+    await drive.files.update({
+      fileId: stray_folder_id,
+      requestBody: { trashed: true },
+      supportsAllDrives: true,
+      fields: 'id',
+    });
+    D.bustFolders(drive, null);
+
+    res.json({ ok: true, trashed: true, name: meta.data.name });
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[drive/duplicate-folders/trash]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
 // POST /api/drive/save-report  multipart: file (pdf/jpg) + patient_code + session_date
 router.post('/save-report', authRequired(), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file required' });
