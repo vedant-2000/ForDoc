@@ -283,13 +283,35 @@ if (distDir) {
     'flutter_bootstrap.js',
     'version.json',
   ]);
+
+  // Files that keep the SAME NAME across builds while their contents change.
+  // Vite hashes its bundle names, so the 1d cache above is safe for those.
+  // Flutter does not: `main.dart.js` is called `main.dart.js` in every build
+  // it has ever produced. Caching that for a day means a deploy is invisible
+  // to anyone who loaded the site earlier — the index.html and bootstrap were
+  // fresh, the 4.6MB of actual app was a day old, and the new screen simply
+  // was not there.
+  //
+  // `no-cache` here means "revalidate", NOT "do not store": the browser keeps
+  // its copy and asks each time, and express.static answers an unchanged file
+  // with a 304 and no body. Correct on deploy day, and no download on the
+  // other 364 — which is why this is not in NEVER_CACHE, whose `no-store`
+  // would re-send every megabyte on every page load.
+  const REVALIDATE = new Set([
+    'main.dart.js',
+    'flutter.js',
+  ]);
+
   app.use(express.static(distDir, {
     maxAge: '1d',
     setHeaders: (res, filePath) => {
-      if (NEVER_CACHE.has(path.basename(filePath))) {
+      const name = path.basename(filePath);
+      if (NEVER_CACHE.has(name)) {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
+      } else if (REVALIDATE.has(name)) {
+        res.setHeader('Cache-Control', 'no-cache');
       }
     },
   }));

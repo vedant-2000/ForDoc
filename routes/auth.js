@@ -207,6 +207,17 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
+/// Postgres' "relation ... does not exist" for our table, and nothing else.
+///
+/// Worth singling out because it is the one failure with an obvious fix, and
+/// a bare 500 sends whoever sees it reading server logs to find out that a
+/// migration was never applied.
+const isMissingTable = (e) =>
+  /service_refresh_tokens/.test(e.message) && /does not exist/i.test(e.message);
+
+const MIGRATION_HINT =
+  'Table missing — run: node scripts/migrate.js 006';
+
 // GET /api/auth/service-tokens   (admin)
 router.get('/service-tokens', authRequired(['admin']), async (_req, res) => {
   try {
@@ -225,6 +236,11 @@ router.get('/service-tokens', authRequired(['admin']), async (_req, res) => {
     });
   } catch (e) {
     console.error('[auth/service-tokens list]', e.message);
+    if (isMissingTable(e)) {
+      // 200, not 500: the panel is perfectly usable with an empty list and a
+      // line saying what to run. A 500 here just makes it look broken.
+      return res.json({ tokens: [], service_account: null, service_error: MIGRATION_HINT });
+    }
     res.status(500).json({ error: 'Failed to list tokens' });
   }
 });
@@ -261,11 +277,7 @@ router.post('/service-tokens', authRequired(['admin']), async (req, res) => {
   } catch (e) {
     console.error('[auth/service-tokens create]', e.message);
     // The one failure worth naming: the migration has not been run.
-    if (/service_refresh_tokens/.test(e.message) && /does not exist/i.test(e.message)) {
-      return res.status(500).json({
-        error: 'Table missing — run db/migrations/006_service_refresh_tokens.sql',
-      });
-    }
+    if (isMissingTable(e)) return res.status(500).json({ error: MIGRATION_HINT });
     res.status(500).json({ error: 'Failed to issue token' });
   }
 });
