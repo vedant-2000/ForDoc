@@ -21,6 +21,21 @@ function sign(payload) {
     : jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
 }
 
+// How long an access token minted from a service refresh token lives.
+// Deliberately short and deliberately NOT tied to JWT_EXPIRES_IN: that setting
+// exists so the clinic terminal is not logged out mid-day, and this one exists
+// so a token intercepted off a phone is worthless within the hour.
+const SERVICE_ACCESS_EXPIRES = process.env.SERVICE_ACCESS_EXPIRES_IN || '15m';
+
+/// A short-lived token, whatever JWT_EXPIRES_IN says.
+///
+/// sign() above honours the 'never' setting this deployment uses, which is
+/// right for a person sitting at the clinic terminal and wrong for a
+/// credential living on a phone. This one always carries an `exp`.
+function signAccess(payload) {
+  return jwt.sign(payload, SECRET, { expiresIn: SERVICE_ACCESS_EXPIRES });
+}
+
 function verify(token) {
   return jwt.verify(token, SECRET);
 }
@@ -67,4 +82,4 @@ function authRequired(roles = null, opts = {}) {
   };
 }
 
-module.exports = { sign, verify, authRequired };
+module.exports = { sign, signAccess, verify, authRequired, SERVICE_ACCESS_EXPIRES };
