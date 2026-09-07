@@ -24,6 +24,7 @@ const express = require('express');
 const path    = require('path');
 const fs      = require('fs');
 const multer  = require('multer');
+const crypto  = require('crypto');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
 const D = require('../utils/drive');
@@ -202,6 +203,153 @@ async function pushToDrive(docId, adminId) {
     return { ok: false, error: msg };
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/documents/intake   (NO Bearer auth — see below)
+//
+// One-shot filing for machine clients: file + who it belongs to + the
+// credential, in a single multipart request.
+//
+// This exists because of what it replaced. The iOS Shortcut that files
+// PostureScreen exports originally did the whole dance itself — refresh the
+// token, search patients, loop the results into labels, show a picker, regex
+// the id back out, upload — seventeen actions typed by hand into a phone,
+// every one of them a chance to mistype a header. All of that except "which
+// patient?" is logic, and logic belongs here, where it can be read and fixed
+// without a phone in your hand. The shortcut is now four actions.
+//
+// Deliberately above router.use(authRequired()): the refresh token arrives as
+// a form field rather than a header, because one less thing to configure in
+// Shortcuts is one less thing to get wrong. It is still the same revocable
+// credential from service_refresh_tokens, checked the same way, over HTTPS.
+//
+// The patient is named rather than picked. An exact patient_code wins
+// outright; otherwise a search must land on exactly one row. Anything else
+// comes back as a message naming the candidates, so the answer to an
+// ambiguous query is the doctor typing a better one — never this endpoint
+// guessing which patient a clinical document belongs to.
+router.post('/intake', upload.single('file'), async (req, res) => {
+  const b = req.body || {};
+  const raw = String(b.token || '').trim();
+  const q = String(b.q || '').trim();
+
+  // multer has already written the upload to disk, so every failure below has
+  // to sweep it up. This route is unauthenticated: without this, anyone who
+  // can reach it can fill the disk with rejected uploads.
+  const discard = () => {
+    if (req.file) fs.unlink(req.file.path, () => {});
+  };
+  // Answered 200 with ok:false, NOT 4xx, and that is deliberate.
+  //
+  // The only client is an iOS Shortcut, and Shortcuts' "Get Contents of URL"
+  // treats a non-2xx as a failure of the action itself: it stops the shortcut
+  // and shows its own generic error, so the careful message below — the one
+  // naming the three patients that matched — never reaches the doctor. A
+  // patient not being found is a normal answer to a question, not a broken
+  // request, so it comes back as one and the shortcut reads `ok`.
+  //
+  // 5xx is left alone: a crash has no useful message to show anyway.
+  const fail = (message) => {
+    discard();
+    return res.json({ ok: false, message });
+  };
+
+  if (!raw) return fail('Missing token.');
+  if (!q) return fail('Say which patient — a code or a name.');
+  if (!req.file) return fail('No file attached.');
+
+  try {
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const { rows: trows } = await query(
+      `SELECT id, subject_id, subject_role, subject_name, revoked_at
+         FROM service_refresh_tokens WHERE token_hash = $1`, [tokenHash]);
+    if (!trows.length || trows[0].revoked_at) {
+      return fail('This token is not valid any more. Ask for a new one.');
+    }
+    const t = trows[0];
+
+    if (t.subject_role === 'doctor') {
+      const { rows: d } = await query(
+        'SELECT is_active FROM doctors WHERE id=$1', [t.subject_id]);
+      if (!d.length || !d[0].is_active) return fail('That account is disabled.');
+    }
+
+    // Exact code first. A doctor who types a full patient code means that
+    // patient, even if the digits happen to appear inside somebody's phone
+    // number or another code.
+    const { rows: exact } = await query(
+      `SELECT id, patient_code, full_name FROM patients
+        WHERE LOWER(patient_code) = LOWER($1) AND deleted_at IS NULL
+        LIMIT 2`, [q]);
+
+    let matches = exact;
+    if (!matches.length) {
+      ({ rows: matches } = await query(
+        `SELECT id, patient_code, full_name FROM patients
+          WHERE (patient_code ILIKE $1 OR full_name ILIKE $1)
+            AND deleted_at IS NULL
+          ORDER BY full_name
+          LIMIT 6`, [`%${q}%`]));
+    }
+
+    if (!matches.length) return fail(`No patient matches "${q}".`);
+    if (matches.length > 1) {
+      const names = matches
+        .map((p) => `${p.patient_code} ${p.full_name}`)
+        .join(', ');
+      return fail(`"${q}" matches ${matches.length} patients: ${names}. Try the code.`);
+    }
+    const p = matches[0];
+
+    const { rows } = await query(
+      `INSERT INTO patient_documents
+         (patient_id, category, title, doc_date, filename, original_name,
+          mime_type, size_bytes, uploaded_by, uploaded_by_name, sync_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+       RETURNING id`,
+      [
+        p.id,
+        cat(b.category),
+        textOrNull(req.file.originalname, 200),
+        dateOrToday(b.doc_date, req.file.originalname),
+        req.file.filename,
+        textOrNull(req.file.originalname, 200),
+        req.file.mimetype || null,
+        req.file.size || null,
+        t.subject_id,
+        textOrNull(t.subject_name, 120),
+      ]);
+
+    // adminId is null: these tokens act as a doctor, and Drive pushes for a
+    // doctor go through the clinic's own connection, same as any upload made
+    // from the app by that doctor.
+    const sync = await pushToDrive(rows[0].id, null);
+
+    query(
+      `UPDATE service_refresh_tokens
+          SET last_used_at = NOW(), use_count = use_count + 1 WHERE id = $1`,
+      [t.id],
+    ).catch((e) => console.error('[documents/intake] usage update', e.message));
+
+    // A Drive failure is NOT an error here. The document is saved and visible
+    // in the app; Drive retries from the document itself. Saying "failed" to
+    // someone standing in a clinic would send them uploading it a second time.
+    res.status(201).json({
+      ok: true,
+      message: sync.ok
+        ? `Saved to ${p.patient_code} ${p.full_name}.`
+        : `Saved to ${p.patient_code} ${p.full_name} — Drive sync pending, retry from the app.`,
+      patient: { id: p.id, patient_code: p.patient_code, full_name: p.full_name },
+      document_id: rows[0].id,
+    });
+  } catch (e) {
+    console.error('[documents/intake]', e);
+    if (/service_refresh_tokens/.test(e.message) && /does not exist/i.test(e.message)) {
+      return fail('Server not set up: run node scripts/migrate.js 006');
+    }
+    return fail('Could not save. Try again.');
+  }
+});
 
 router.use(authRequired());
 
