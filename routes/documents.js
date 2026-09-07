@@ -239,6 +239,26 @@ router.post('/intake', upload.single('file'), async (req, res) => {
   const discard = () => {
     if (req.file) fs.unlink(req.file.path, () => {});
   };
+
+  // Everything this route received, in one line, before anything is judged.
+  //
+  // The client is a form built by hand on a phone, so the usual question when
+  // it misbehaves is "what did Shortcuts actually send?" — and the answer used
+  // to be unobtainable without reading response byte counts. Field NAMES are
+  // the tell: a `file` in this list rather than on req.file means the form
+  // field was left on type Text, and a missing key means a typo in the
+  // shortcut. The token is reported as present/absent and never printed; it is
+  // a live credential and pm2 logs are not the place for it.
+  const arrived = [
+    `fields=[${Object.keys(b).join(',') || 'none'}]`,
+    `token=${raw ? 'present' : 'MISSING'}`,
+    `q=${q ? JSON.stringify(q) : 'MISSING'}`,
+    req.file
+      ? `file="${req.file.originalname}" ${req.file.size}b ${req.file.mimetype || 'no-mime'}`
+      : 'file=MISSING',
+  ].join(' ');
+  console.log('[intake] <-', arrived);
+
   // Answered 200 with ok:false, NOT 4xx, and that is deliberate.
   //
   // The only client is an iOS Shortcut, and Shortcuts' "Get Contents of URL"
@@ -250,13 +270,24 @@ router.post('/intake', upload.single('file'), async (req, res) => {
   //
   // 5xx is left alone: a crash has no useful message to show anyway.
   const fail = (message) => {
+    console.log('[intake] -> REJECTED:', message);
     discard();
     return res.json({ ok: false, message });
   };
 
   if (!raw) return fail('Missing token.');
   if (!q) return fail('Say which patient — a code or a name.');
-  if (!req.file) return fail('No file attached.');
+  // Two different mistakes produce "no file", and telling them apart saves a
+  // long guessing session on a phone. A `file` that arrived as a TEXT field
+  // means the Shortcuts form field was left on type Text — the file's name
+  // came through as a string. No `file` at all usually means the shortcut was
+  // run from the Play button inside the Shortcuts app, where there is no
+  // share-sheet input to pass on.
+  if (!req.file) {
+    return fail(b.file
+      ? 'The "file" field is set to Text. Change its type to File, value Shortcut Input.'
+      : 'No file attached. Run this from a share sheet (not the Play button), and set the "file" field to type File with value Shortcut Input.');
+  }
 
   try {
     const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
@@ -330,6 +361,11 @@ router.post('/intake', upload.single('file'), async (req, res) => {
           SET last_used_at = NOW(), use_count = use_count + 1 WHERE id = $1`,
       [t.id],
     ).catch((e) => console.error('[documents/intake] usage update', e.message));
+
+    console.log(
+      `[intake] -> SAVED doc=${rows[0].id} patient=${p.patient_code} ` +
+      `"${p.full_name}" as=${t.subject_name} token=#${t.id} ` +
+      `drive=${sync.ok ? 'ok' : 'FAILED (' + sync.error + ')'}`);
 
     // A Drive failure is NOT an error here. The document is saved and visible
     // in the app; Drive retries from the document itself. Saying "failed" to
