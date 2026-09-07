@@ -16,7 +16,15 @@ const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(authRequired());
+
+// The Store screen gates the WHOLE file, not just the admin actions.
+//
+// Reads and the inward/outward posts used to sit behind a bare
+// authRequired(), so any signed-in doctor could list stock and record
+// movements whether or not they were meant to have Store at all. Revoking
+// the screen hid the button and left those endpoints open, which is not a
+// permission - it is a suggestion. An admin still reaches everything.
+router.use(authRequired(['admin'], { screen: 'store' }));
 
 // ─────────────────────────────────────────────────────────────
 // Item-photo uploads: files land in backend/uploads/store-items/
@@ -125,7 +133,7 @@ router.get('/categories', async (req, res) => {
 });
 
 // POST /api/store/categories { parent_path?, name, sort_order? }
-router.post('/categories', authRequired(['admin']), async (req, res) => {
+router.post('/categories', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const { parent_path, name, sort_order } = req.body || {};
   const trimmed = String(name || '').trim();
   if (!trimmed) return res.status(400).json({ error: 'name required' });
@@ -153,7 +161,7 @@ router.post('/categories', authRequired(['admin']), async (req, res) => {
 // PATCH /api/store/categories/:id { name?, sort_order? }
 // Renames the LABEL only (display name). Path itself is immutable; if you
 // really need to move a subtree, delete & recreate.
-router.patch('/categories/:id', authRequired(['admin']), async (req, res) => {
+router.patch('/categories/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   const { name, sort_order, is_active } = req.body || {};
   const sets = [];
@@ -187,7 +195,7 @@ router.patch('/categories/:id', authRequired(['admin']), async (req, res) => {
 });
 
 // DELETE /api/store/categories/:id — soft delete (is_active=false).
-router.delete('/categories/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/categories/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const r = await query('UPDATE store_categories SET is_active=FALSE WHERE id=$1', [id]);
@@ -293,7 +301,7 @@ router.get('/items/:id(\\d+)/photos', async (req, res) => {
 });
 
 // POST /api/store/items/:id/photos  (admin) — multipart field 'file'
-router.post('/items/:id(\\d+)/photos', authRequired(['admin']), photoUpload.single('file'), async (req, res) => {
+router.post('/items/:id(\\d+)/photos', authRequired(['admin'], { screen: 'store' }), photoUpload.single('file'), async (req, res) => {
   const id = +req.params.id;
   if (!req.file) return res.status(400).json({ error: 'file is required' });
   try {
@@ -320,7 +328,7 @@ router.post('/items/:id(\\d+)/photos', authRequired(['admin']), photoUpload.sing
 });
 
 // DELETE /api/store/items/:id/photos/:photoId  (admin)
-router.delete('/items/:id(\\d+)/photos/:photoId(\\d+)', authRequired(['admin']), async (req, res) => {
+router.delete('/items/:id(\\d+)/photos/:photoId(\\d+)', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   const photoId = +req.params.photoId;
   try {
@@ -338,7 +346,7 @@ router.delete('/items/:id(\\d+)/photos/:photoId(\\d+)', authRequired(['admin']),
 });
 
 // POST /api/store/items { category_path, name, code?, unit?, notes? }
-router.post('/items', authRequired(['admin']), async (req, res) => {
+router.post('/items', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const { category_path, name, code, unit, notes } = req.body || {};
   if (!name || !category_path) {
     return res.status(400).json({ error: 'name and category_path required' });
@@ -368,7 +376,7 @@ router.post('/items', authRequired(['admin']), async (req, res) => {
 });
 
 // PATCH /api/store/items/:id
-router.patch('/items/:id', authRequired(['admin']), async (req, res) => {
+router.patch('/items/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   const { category_path, name, code, unit, notes, is_active } = req.body || {};
   const sets = ['updated_at = NOW()'];
@@ -401,7 +409,7 @@ router.patch('/items/:id', authRequired(['admin']), async (req, res) => {
   }
 });
 
-router.delete('/items/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/items/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const r = await query('UPDATE store_items SET is_active=FALSE WHERE id=$1', [id]);
@@ -483,7 +491,7 @@ router.post('/inward', async (req, res) => {
   }
 });
 
-router.delete('/inward/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/inward/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const r = await query('DELETE FROM store_inward WHERE id=$1', [id]);
@@ -593,7 +601,7 @@ router.post('/outward', async (req, res) => {
   }
 });
 
-router.delete('/outward/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/outward/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const r = await query('DELETE FROM store_outward WHERE id=$1', [id]);

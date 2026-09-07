@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt  = require('bcryptjs');
 const { query } = require('../db/pool');
 const { sign, authRequired } = require('../middleware/auth');
+const { sanitizeScreens } = require('../middleware/screens');
 
 const router = express.Router();
 
@@ -28,7 +29,9 @@ router.post('/login', async (req, res) => {
 
     // doctor login
     const { rows: drows } = await query(
-      'SELECT id, username, full_name, password_hash, color, is_active FROM doctors WHERE username=$1',
+      `SELECT id, username, full_name, password_hash, color, is_active,
+              screens
+         FROM doctors WHERE username=$1`,
       [username]
     );
     if (!drows.length) return res.status(401).json({ error: 'Invalid credentials' });
@@ -37,12 +40,23 @@ router.post('/login', async (req, res) => {
     const ok = await bcrypt.compare(password, doc.password_hash);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = sign({ id: doc.id, role: 'doctor', username: doc.username });
+    // In the token as well as the response: authRequired reads this straight
+    // off the payload, so no route has to hit the database to check access.
+    // Sanitised on the way out so a key retired in a later build cannot keep
+    // opening a screen from an old row.
+    const screens = sanitizeScreens(doc.screens);
+    const token = sign({
+      id: doc.id,
+      role: 'doctor',
+      username: doc.username,
+      screens,
+    });
     res.json({
       token,
       user: {
         id: doc.id, role: 'doctor', username: doc.username,
-        full_name: doc.full_name, color: doc.color
+        full_name: doc.full_name, color: doc.color,
+        screens,
       }
     });
   } catch (e) {

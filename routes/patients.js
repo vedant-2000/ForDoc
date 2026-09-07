@@ -100,7 +100,7 @@ router.get('/', async (req, res) => {
 // Status is computed, not stored, so the filter and the counts are applied
 // AFTER the comparison and the page is sliced last. Paging in SQL first
 // would hand back partial pages and counts that disagree with the rows.
-router.get('/drive-folders', authRequired(['admin']), async (req, res) => {
+router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders' }), async (req, res) => {
   const limit = Math.min(200, Math.max(1, +req.query.limit || 25));
   const offset = Math.max(0, +req.query.offset || 0);
   const q = String(req.query.q || '').trim();
@@ -615,7 +615,7 @@ router.post('/:id(\\d+)/drive-folder', async (req, res) => {
 //
 // Attach the patient to a folder that already exists - the normal case when
 // adopting a Drive the clinic has been filling in by hand for years.
-router.post('/:id(\\d+)/drive-folder/link', authRequired(['admin']), async (req, res) => {
+router.post('/:id(\\d+)/drive-folder/link', authRequired(['admin'], { screen: 'patient_folders' }), async (req, res) => {
   const id = +req.params.id;
   const folderId = String((req.body || {}).folder_id || '').trim();
   if (!folderId) return res.status(400).json({ error: 'folder_id required' });
@@ -655,7 +655,7 @@ router.post('/:id(\\d+)/drive-folder/link', authRequired(['admin']), async (req,
 //
 // No Drive round-trip on purpose: asking Google about the folder first is
 // exactly what fails for these rows.
-router.post('/:id(\\d+)/drive-folder/unlink', authRequired(['admin']), async (req, res) => {
+router.post('/:id(\\d+)/drive-folder/unlink', authRequired(['admin'], { screen: 'patient_folders' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const { rowCount } = await query(
@@ -675,7 +675,7 @@ router.post('/:id(\\d+)/drive-folder/unlink', authRequired(['admin']), async (re
 // migrate patients one at a time after the base folder is repointed - the
 // folder keeps its id and all its contents, so nothing already uploaded is
 // disturbed and no link breaks.
-router.post('/:id(\\d+)/drive-folder/move', authRequired(['admin']), async (req, res) => {
+router.post('/:id(\\d+)/drive-folder/move', authRequired(['admin'], { screen: 'patient_folders' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const { rows } = await query(

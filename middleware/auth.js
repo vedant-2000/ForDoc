@@ -25,8 +25,28 @@ function verify(token) {
   return jwt.verify(token, SECRET);
 }
 
-function authRequired(roles = null) {
-  // roles: null = any logged-in user; otherwise array of allowed roles ['admin','doctor']
+/// Gate a route on role, or on ONE screen an admin has granted this doctor.
+///
+/// [roles]  null = any logged-in user; otherwise e.g. ['admin'].
+/// [opts.screen]  the screen this route belongs to ('rooms', 'reports', …,
+///                see middleware/screens.js). A doctor granted that screen
+///                reaches this route; every other admin route stays shut.
+///
+/// There is deliberately NO blanket "treat this doctor as an admin" flag.
+/// Access is per screen and nothing else, so granting Rooms cannot quietly
+/// hand somebody the Doctors tab or the Drive settings. A doctor with every
+/// screen ticked can do what an admin can, but only because an admin ticked
+/// each one.
+///
+/// A route with no [screen] and roles ['admin'] stays admin-only, full stop —
+/// that is the safe default for anything nobody has classified yet.
+///
+/// The list rides in the JWT, so revoking a screen takes effect when that
+/// doctor's token is next issued. Tokens are long-lived by default
+/// (JWT_EXPIRES_IN, 30d) - to cut access off at once, disable the account,
+/// which is checked at login, or rotate JWT_SECRET.
+function authRequired(roles = null, opts = {}) {
+  const screen = opts.screen || null;
   return (req, res, next) => {
     const h = req.headers.authorization || '';
     const token = h.startsWith('Bearer ') ? h.slice(7) : null;
@@ -34,9 +54,12 @@ function authRequired(roles = null) {
     try {
       const payload = verify(token);
       if (roles && !roles.includes(payload.role)) {
-        return res.status(403).json({ error: 'Forbidden' });
+        const granted = screen !== null
+          && Array.isArray(payload.screens)
+          && payload.screens.includes(screen);
+        if (!granted) return res.status(403).json({ error: 'Forbidden' });
       }
-      req.user = payload;   // { id, role, username }
+      req.user = payload;   // { id, role, username, screens? }
       next();
     } catch (e) {
       return res.status(401).json({ error: 'Invalid or expired token' });

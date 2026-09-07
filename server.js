@@ -153,7 +153,7 @@ app.use('/api/reports',    require('./routes/reports'));
 // Health: also reports cache and memory, so "is the cache actually working?"
 // and "how close are we to the 400MB PM2 restart ceiling?" can be answered
 // from a browser rather than by guessing.
-app.get('/api/health', async (_req, res) => {
+app.get('/api/health', async (req, res) => {
   const mem = process.memoryUsage();
 
   // How long a login lasts on THIS server. Without it, "why am I logged out
@@ -180,9 +180,27 @@ app.get('/api/health', async (_req, res) => {
     dbError = e.message;
   }
 
+  // Is the caller an admin? Deliberately best-effort: a bad or absent token
+  // simply means the short answer, never a 401 — an uptime monitor must not
+  // start failing because it has no credentials.
+  let isAdmin = false;
+  try {
+    const h = req.headers.authorization || '';
+    if (h.startsWith('Bearer ')) {
+      isAdmin = require('./middleware/auth').verify(h.slice(7)).role === 'admin';
+    }
+  } catch { /* not an admin; fall through to the public answer */ }
+
+  // Public: alive, and whether the database answered. Nothing that describes
+  // the machine or the deployment.
+  if (!isAdmin) {
+    return res.json({ ok: true, ts: Date.now(), db_ok: dbError === null });
+  }
+
   res.json({
     ok: true,
     ts: Date.now(),
+    db_ok: dbError === null,
     uptime_s: Math.round(process.uptime()),
     db_ms: dbMs == null ? null : +dbMs.toFixed(1),
     db_error: dbError,

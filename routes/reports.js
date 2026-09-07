@@ -37,7 +37,7 @@ function isDate(v) {
 }
 
 // GET /api/reports/activity?from=&to=&tz=   (admin)
-router.get('/activity', authRequired(['admin']), async (req, res) => {
+router.get('/activity', authRequired(['admin'], { screen: 'reports' }), async (req, res) => {
   const from = String(req.query.from || '').trim();
   const to = String(req.query.to || '').trim();
   const tz = String(req.query.tz || process.env.REPORT_TZ || '').trim() || null;
@@ -263,7 +263,7 @@ router.get('/activity', authRequired(['admin']), async (req, res) => {
 // Records (or clears) "I have checked this patient's record for this period".
 // Idempotent: pressing it twice leaves the same single row, so a double-click
 // cannot produce two conflicting marks.
-router.post('/verify', authRequired(['admin']), async (req, res) => {
+router.post('/verify', authRequired(['admin'], { screen: 'reports' }), async (req, res) => {
   const patientId = +(req.body || {}).patient_id;
   const from = String((req.body || {}).from || '').trim();
   const to = String((req.body || {}).to || '').trim();

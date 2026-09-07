@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS doctors (
 
 CREATE INDEX IF NOT EXISTS idx_doctors_username ON doctors(username);
 
+-- Screens an admin has opened up for a doctor: 'reports', 'rooms',
+-- 'store' and so on, matching the tabs in the app and the keys in
+-- middleware/screens.js. Empty means "no admin screens", which is what a new
+-- doctor gets. There is no blanket admin flag on purpose - see
+-- db/migrations/005_doctor_permissions.sql.
+ALTER TABLE doctors ADD COLUMN IF NOT EXISTS screens TEXT[] NOT NULL DEFAULT '{}';
+
 -- ── Patients ───────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patients (
     id              SERIAL PRIMARY KEY,

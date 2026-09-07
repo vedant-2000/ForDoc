@@ -54,7 +54,7 @@ router.get('/info', authRequired(), async (req, res) => {
 });
 
 // POST /api/drive/disconnect (admin) — revoke + remove tokens
-router.post('/disconnect', authRequired(['admin']), async (_req, res) => {
+router.post('/disconnect', authRequired(['admin'], { screen: 'drive' }), async (_req, res) => {
   try {
     const { rows } = await query('SELECT * FROM drive_tokens LIMIT 1');
     if (rows.length) {
@@ -74,7 +74,7 @@ router.post('/disconnect', authRequired(['admin']), async (_req, res) => {
 });
 
 // GET /api/drive/auth-url  (admin) — returns Google consent URL
-router.get('/auth-url', authRequired(['admin']), (req, res) => {
+router.get('/auth-url', authRequired(['admin'], { screen: 'drive' }), (req, res) => {
   if (!isConfigured()) {
     return res.status(400).json({
       error: 'Google OAuth credentials are not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in backend/.env, then restart the server.',
@@ -126,9 +126,14 @@ router.get('/callback', async (req, res) => {
       detail: email ? `Signed in as ${email}` : 'You can close this window.',
     }));
   } catch (e) {
+    // Logged in full, shown in outline: this page is reachable without a
+    // token, so the browser gets a sentence and the server keeps the detail.
     console.error('[drive/callback]', e);
     res.status(500).send(renderPopupPage({
-      ok: false, title: 'Sign-in failed', detail: e.message,
+      ok: false,
+      title: 'Sign-in failed',
+      detail: 'Could not complete the Google sign-in. Check the server log '
+        + 'for the reason, then try again from Admin -> Google Drive.',
     }));
   }
 });
@@ -145,7 +150,7 @@ router.get('/callback', async (req, res) => {
 // the callback itself, and this is the one-time admin action that connects
 // the clinic's Drive - it should not require a domain and a certificate
 // first.
-router.post('/exchange', authRequired(['admin']), async (req, res) => {
+router.post('/exchange', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const body = req.body || {};
   let code = String(body.code || '').trim();
 
@@ -225,7 +230,7 @@ function renderPopupPage({ ok, title, detail }) {
 // patient creation and the folder worklist answer from memory instead of
 // waiting on Google, so being able to see its state is the difference
 // between "the app is slow" and "the index is still building".
-router.get('/folder-index', authRequired(['admin']), async (req, res) => {
+router.get('/folder-index', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   try {
     const drive = await D.getDriveForAdmin(req.user.id);
     const inv = D.folderInventoryReady(drive);
@@ -258,7 +263,7 @@ router.get('/folder-index', authRequired(['admin']), async (req, res) => {
 // Returns immediately: a full enumeration takes longer than a request should
 // live, and making the caller wait for it is exactly the mistake that made
 // the folder worklist time out.
-router.post('/folder-index/resync', authRequired(['admin']), async (req, res) => {
+router.post('/folder-index/resync', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   try {
     const drive = await D.getDriveForAdmin(req.user.id);
     D.startFolderInventory(drive, { fresh: true });
@@ -284,7 +289,7 @@ router.post('/folder-index/resync', authRequired(['admin']), async (req, res) =>
 // path of every hit, plus whether that hit is inside the current base. So the
 // answer is either "your base folder is pointed at the wrong place", "these
 // folders are nested too deep", or "nothing in Drive carries this code".
-router.get('/find-folder', authRequired(['admin']), async (req, res) => {
+router.get('/find-folder', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const code = String(req.query.code || '').trim();
   const name = String(req.query.name || '').trim();
   if (!code && !name) {
@@ -464,7 +469,7 @@ router.get('/find-folder', authRequired(['admin']), async (req, res) => {
 //
 // Read-only: nothing is created, moved or linked here. It answers "how far
 // apart are these two lists" so the admin can decide what to do about it.
-router.get('/reconcile', authRequired(['admin']), async (req, res) => {
+router.get('/reconcile', authRequired(['admin'], { screen: 'drive_reconcile' }), async (req, res) => {
   try {
     const settings = await D.getSettings();
     const drive = await D.getDriveForAdmin(req.user.id);
@@ -615,7 +620,7 @@ function guessCodeAndName(raw) {
 //
 // Lists child folders so the admin can navigate to whatever structure their
 // Drive already uses, instead of typing a path and hoping it matches.
-router.get('/folders', authRequired(['admin']), async (req, res) => {
+router.get('/folders', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   try {
     const { rows } = await query('SELECT admin_id FROM drive_tokens LIMIT 1');
     if (!rows.length) {
@@ -654,7 +659,7 @@ router.get('/folders', authRequired(['admin']), async (req, res) => {
 // section under a machine root that is not a child of 'root' - unreachable
 // from the top, yet perfectly usable once its id is known. Shared-drive
 // folders have the same shape.
-router.get('/folder-info', authRequired(['admin']), async (req, res) => {
+router.get('/folder-info', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const raw = String(req.query.id || '').trim();
   if (!raw) return res.status(400).json({ error: 'id required' });
 
@@ -700,7 +705,7 @@ router.get('/folder-info', authRequired(['admin']), async (req, res) => {
 
 // POST /api/drive/folders  { parent, name }  (admin) - create a subfolder
 // from inside the picker, so a new tree can be started without leaving here.
-router.post('/folders', authRequired(['admin']), async (req, res) => {
+router.post('/folders', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const name = String((req.body || {}).name || '').trim();
   const parent = String((req.body || {}).parent || 'root');
   if (!name) return res.status(400).json({ error: 'name required' });
@@ -755,7 +760,7 @@ router.get('/settings', authRequired(), async (_req, res) => {
 });
 
 // PUT /api/drive/settings (admin)
-router.put('/settings', authRequired(['admin']), async (req, res) => {
+router.put('/settings', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const b = req.body || {};
   const patch = {};
   if ('root_folder_id' in b) {
@@ -782,7 +787,7 @@ router.put('/settings', authRequired(['admin']), async (req, res) => {
 // POST /api/drive/settings/preview (admin) - resolve the folder chain for a
 // sample patient WITHOUT creating anything, so the admin can see the layout
 // their template produces before committing to it.
-router.post('/settings/preview', authRequired(['admin']), async (req, res) => {
+router.post('/settings/preview', authRequired(['admin'], { screen: 'drive' }), async (req, res) => {
   const b = req.body || {};
   try {
     const stored = await D.getSettings();
@@ -833,7 +838,7 @@ router.post('/settings/preview', authRequired(['admin']), async (req, res) => {
 //
 // Read-only. It reports the split and what is sitting in the stray folder;
 // moving anything is a separate, explicit call.
-router.get('/duplicate-folders', authRequired(['admin']), async (req, res) => {
+router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folders' }), async (req, res) => {
   try {
     const settings = await D.getSettings();
     const drive = await D.getDriveForAdmin(req.user.id);
@@ -948,7 +953,7 @@ router.get('/duplicate-folders', authRequired(['admin']), async (req, res) => {
 //
 // The stray folder itself is left in place, empty. Deleting a folder on a
 // clinic's live Drive is not something this should decide.
-router.post('/duplicate-folders/merge', authRequired(['admin']), async (req, res) => {
+router.post('/duplicate-folders/merge', authRequired(['admin'], { screen: 'split_folders' }), async (req, res) => {
   const { patient_id, stray_folder_id } = req.body || {};
   if (!patient_id) return res.status(400).json({ error: 'patient_id required' });
   if (!stray_folder_id) {

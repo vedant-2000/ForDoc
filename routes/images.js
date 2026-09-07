@@ -82,7 +82,7 @@ router.get('/:id(\\d+)', async (req, res) => {
 });
 
 // GET /api/images   (admin) — list all uploads
-router.get('/', authRequired(['admin']), async (_req, res) => {
+router.get('/', authRequired(['admin'], { screen: 'images' }), async (_req, res) => {
   try {
     const { rows } = await query(
       `SELECT id, filename, original_name, mime_type, width_px, height_px,
@@ -99,7 +99,7 @@ router.get('/', authRequired(['admin']), async (_req, res) => {
 
 // POST /api/images  (admin) — upload + auto-activate
 //  multipart field 'file'; optional width_px/height_px body fields
-router.post('/', authRequired(['admin']), upload.single('file'), async (req, res) => {
+router.post('/', authRequired(['admin'], { screen: 'images' }), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file is required' });
   const { width_px, height_px } = req.body || {};
   try {
@@ -123,7 +123,7 @@ router.post('/', authRequired(['admin']), upload.single('file'), async (req, res
 });
 
 // PUT /api/images/:id/mask  (admin) — replace the blank-region mask PNG
-router.put('/:id/mask', authRequired(['admin']), maskUpload.single('file'), async (req, res) => {
+router.put('/:id/mask', authRequired(['admin'], { screen: 'images' }), maskUpload.single('file'), async (req, res) => {
   const id = +req.params.id;
   if (!req.file) return res.status(400).json({ error: 'file is required' });
   try {
@@ -145,7 +145,7 @@ router.put('/:id/mask', authRequired(['admin']), maskUpload.single('file'), asyn
 });
 
 // DELETE /api/images/:id/mask  (admin) — clear the mask
-router.delete('/:id/mask', authRequired(['admin']), async (req, res) => {
+router.delete('/:id/mask', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const { rows } = await query('SELECT blank_mask_filename FROM body_images WHERE id=$1', [id]);
@@ -164,7 +164,7 @@ router.delete('/:id/mask', authRequired(['admin']), async (req, res) => {
 // Used by the admin UI to show a real warning before deletion, since deleting
 // the image row nulls each mark's body_image_id (ON DELETE SET NULL) and those
 // sessions will then render against whatever image is currently active.
-router.get('/:id(\\d+)/usage', authRequired(['admin']), async (req, res) => {
+router.get('/:id(\\d+)/usage', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const { rows } = await query(
@@ -180,7 +180,7 @@ router.get('/:id(\\d+)/usage', authRequired(['admin']), async (req, res) => {
 });
 
 // POST /api/images/:id/activate
-router.post('/:id/activate', authRequired(['admin']), async (req, res) => {
+router.post('/:id/activate', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
   const id = +req.params.id;
   try {
     await tx(async (c) => {
@@ -196,7 +196,7 @@ router.post('/:id/activate', authRequired(['admin']), async (req, res) => {
 });
 
 // DELETE /api/images/:id   (admin)
-router.delete('/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/:id', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
   const id = +req.params.id;
   try {
     const { rows } = await query(

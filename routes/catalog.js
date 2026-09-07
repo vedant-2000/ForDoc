@@ -59,7 +59,7 @@ router.get('/treatments/flat', authRequired(), async (_req, res) => {
 
 // PUT /api/catalog/treatments/:room   body: { treatments: ['SLT', 'IMS', ...] }
 // Replaces ALL treatments for one room (preserving order from the array).
-router.put('/treatments/:room', authRequired(['admin']), async (req, res) => {
+router.put('/treatments/:room', authRequired(['admin'], { screen: 'treatments' }), async (req, res) => {
   const room = String(req.params.room || '').trim();
   if (!room) return res.status(400).json({ error: 'Room required' });
   const list = Array.isArray(req.body?.treatments) ? req.body.treatments : null;
@@ -105,7 +105,7 @@ router.put('/treatments/:room', authRequired(['admin']), async (req, res) => {
 
 // POST /api/catalog/treatments  body: { catalog: { 'R-1': [...], ... } }
 // Bulk replace — wipes and re-seeds the whole catalog.
-router.post('/treatments', authRequired(['admin']), async (req, res) => {
+router.post('/treatments', authRequired(['admin'], { screen: 'treatments' }), async (req, res) => {
   const cat = req.body?.catalog;
   if (!cat || typeof cat !== 'object') {
     return res.status(400).json({ error: 'catalog object required' });
@@ -159,7 +159,7 @@ router.get('/sitting-positions', authRequired(), async (_req, res) => {
 
 // PUT /api/catalog/sitting-positions   body: { positions: ['Sitting','Standing',...] }
 // Admin: replace ALL sitting positions (preserving order from the array).
-router.put('/sitting-positions', authRequired(['admin']), async (req, res) => {
+router.put('/sitting-positions', authRequired(['admin'], { screen: 'sitting' }), async (req, res) => {
   const list = Array.isArray(req.body?.positions) ? req.body.positions : null;
   if (!list) return res.status(400).json({ error: 'positions must be an array' });
 
@@ -214,7 +214,7 @@ router.get('/effectiveness', authRequired(), async (_req, res) => {
 
 // PUT /api/catalog/effectiveness   body: { options: ['1Q','2Q',...] }
 // Admin: replace the whole list, preserving the array's order.
-router.put('/effectiveness', authRequired(['admin']), async (req, res) => {
+router.put('/effectiveness', authRequired(['admin'], { screen: 'effectiveness' }), async (req, res) => {
   const list = Array.isArray(req.body?.options) ? req.body.options : null;
   if (!list) return res.status(400).json({ error: 'options must be an array' });
 
@@ -273,7 +273,7 @@ router.get('/rooms', authRequired(), async (_req, res) => {
 });
 
 // POST /api/catalog/rooms   body: { name, sort_order? }
-router.post('/rooms', authRequired(['admin']), async (req, res) => {
+router.post('/rooms', authRequired(['admin'], { screen: 'rooms' }), async (req, res) => {
   const name = String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name required' });
   const sortOrder = Number.isFinite(+req.body?.sort_order) ? +req.body.sort_order : 0;
@@ -296,7 +296,7 @@ router.post('/rooms', authRequired(['admin']), async (req, res) => {
 // PUT /api/catalog/rooms/:id   body: { name?, sort_order? }
 // Renaming cascades: every treatment_catalog.room, marks.room, and
 // marks.room_ids[] entry that referenced the old name is updated atomically.
-router.put('/rooms/:id', authRequired(['admin']), async (req, res) => {
+router.put('/rooms/:id', authRequired(['admin'], { screen: 'rooms' }), async (req, res) => {
   const id = +req.params.id;
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'id required' });
   const nextName = req.body?.name != null ? String(req.body.name).trim() : null;
@@ -353,7 +353,7 @@ router.put('/rooms/:id', authRequired(['admin']), async (req, res) => {
 // DELETE /api/catalog/rooms/:id
 // Removes the room and every treatment registered against it. Marks keep
 // their historical room reference as a denormalised string snapshot.
-router.delete('/rooms/:id', authRequired(['admin']), async (req, res) => {
+router.delete('/rooms/:id', authRequired(['admin'], { screen: 'rooms' }), async (req, res) => {
   const id = +req.params.id;
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'id required' });
   try {
@@ -418,7 +418,7 @@ router.get('/treatment-palette', authRequired(), async (_req, res) => {
 // PUT /api/catalog/treatment-palette   body: { treatments: ['A','B',...] }
 // Atomic replace of treatment ordering only — colors are managed separately
 // via the global /color-palette routes.
-router.put('/treatment-palette', authRequired(['admin']), async (req, res) => {
+router.put('/treatment-palette', authRequired(['admin'], { screen: 'order' }), async (req, res) => {
   const list = Array.isArray(req.body?.treatments) ? req.body.treatments : null;
   if (!list) return res.status(400).json({ error: 'treatments must be an array' });
   try {
@@ -465,7 +465,7 @@ router.get('/color-palette', authRequired(), async (_req, res) => {
 
 // PUT /api/catalog/color-palette   body: { colors: ['#rrggbb', ...] }
 // Atomic replace. Order in the array = priority order.
-router.put('/color-palette', authRequired(['admin']), async (req, res) => {
+router.put('/color-palette', authRequired(['admin'], { screen: 'palette' }), async (req, res) => {
   const list = Array.isArray(req.body?.colors) ? req.body.colors : null;
   if (!list) return res.status(400).json({ error: 'colors must be an array' });
 

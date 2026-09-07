@@ -2,17 +2,24 @@ const express = require('express');
 const bcrypt  = require('bcryptjs');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const { SCREENS, sanitizeScreens } = require('../middleware/screens');
 
 const router = express.Router();
 
-// All routes here are admin-only.
-router.use(authRequired(['admin']));
+// Admin-only, EXCEPT that a doctor granted the Doctors screen manages doctors
+// too - that is what granting it means.
+router.use(authRequired(['admin'], { screen: 'doctors' }));
+
+// GET /api/doctors/screens - the grantable screens, so the app renders the
+// same list the server enforces instead of keeping its own copy.
+router.get('/screens', (_req, res) => res.json(SCREENS));
 
 // GET /api/doctors
 router.get('/', async (_req, res) => {
   try {
     const { rows } = await query(
-      `SELECT id, username, full_name, color, is_active, created_at
+      `SELECT id, username, full_name, color, is_active,
+              screens, created_at
        FROM doctors ORDER BY created_at DESC`
     );
     res.json(rows);
@@ -33,7 +40,8 @@ router.post('/', async (req, res) => {
     const { rows } = await query(
       `INSERT INTO doctors (username, full_name, password_hash, color)
        VALUES ($1,$2,$3,COALESCE($4, '#c0392b'))
-       RETURNING id, username, full_name, color, is_active, created_at`,
+       RETURNING id, username, full_name, color, is_active,
+                 screens, created_at`,
       [username.trim(), full_name.trim(), hash, color || null]
     );
     res.status(201).json(rows[0]);
@@ -47,13 +55,19 @@ router.post('/', async (req, res) => {
 // PATCH /api/doctors/:id  { full_name?, color?, password?, is_active? }
 router.patch('/:id', async (req, res) => {
   const id = +req.params.id;
-  const { full_name, color, password, is_active } = req.body || {};
+  const { full_name, color, password, is_active, screens } = req.body || {};
   const sets = [];
   const args = [];
   let i = 1;
   if (full_name !== undefined) { sets.push(`full_name = $${i++}`); args.push(full_name); }
   if (color     !== undefined) { sets.push(`color = $${i++}`);     args.push(color); }
   if (is_active !== undefined) { sets.push(`is_active = $${i++}`); args.push(!!is_active); }
+  // The whole list at a time, sanitised against the known keys. Only an admin
+  // (or a doctor granted the Doctors screen) reaches this file at all.
+  if (screens !== undefined) {
+    sets.push(`screens = $${i++}`);
+    args.push(sanitizeScreens(screens));
+  }
   try {
     if (password) {
       // Inside the try: bcrypt rejects on absurd input, and an unguarded
@@ -66,7 +80,8 @@ router.patch('/:id', async (req, res) => {
     args.push(id);
     const { rows } = await query(
       `UPDATE doctors SET ${sets.join(', ')} WHERE id=$${i}
-       RETURNING id, username, full_name, color, is_active, created_at`,
+       RETURNING id, username, full_name, color, is_active,
+                 screens, created_at`,
       args
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
