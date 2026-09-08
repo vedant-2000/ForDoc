@@ -432,7 +432,7 @@ router.get('/', async (req, res) => {
         WHERE ${where.join(' AND ')}
         ORDER BY d.doc_date DESC, d.id DESC`,
       vals);
-    const docs = rows.map(withUrls);
+    let docs = rows.map(withUrls);
 
     // Best-effort: also surface files that exist ONLY in Drive - dropped in
     // directly, or predating document indexing - so this list matches what
@@ -495,6 +495,78 @@ router.get('/', async (req, res) => {
             drive_thumbnail_link: f.thumbnail_link,
           });
         }
+
+        // ── Documents whose Drive copy has been deleted ──────────────────
+        //
+        // Deleting a document is done in Drive, not in the app (the delete
+        // buttons were removed on purpose — Drive is the archive of record).
+        // For that to mean anything, a row pointing at a file that is no
+        // longer there has to stop appearing here.
+        //
+        // Absence from `walked` is NOT sufficient evidence on its own.
+        // walkPatientFiles goes exactly two levels — the patient folder and
+        // its immediate subfolders — while resolveDocumentFolder files a
+        // third level deep when date_subfolders is enabled. On such a setup
+        // every document is invisible to the walk, and hiding on absence
+        // alone would blank the entire page.
+        //
+        // So absence only makes a row a SUSPECT; each one is then confirmed
+        // against Drive directly. Normally there are no suspects and this
+        // costs nothing. A file that was merely moved, or that lives deeper
+        // than the walk reaches, answers that it exists and stays.
+        try {
+          const seen = new Set(walked.map((f) => f.id));
+          const suspects = docs.filter((d) =>
+            !d.drive_only
+            && d.drive_file_id
+            && !seen.has(d.drive_file_id)
+            // A row with a local copy is still openable, so it is not gone in
+            // any sense the doctor cares about.
+            && !d.filename
+            // Never hide something still on its way TO Drive.
+            && d.sync_status === 'synced');
+
+          // A safety valve, not an optimisation. If a great many rows are
+          // suddenly unaccounted for, the likely explanation is a changed
+          // folder layout or a half-answered Drive call — not that somebody
+          // deleted eighty X-rays. Verifying them one by one would also make
+          // this request crawl. Hide nothing and say so.
+          const MAX_VERIFY = 25;
+          if (suspects.length > MAX_VERIFY) {
+            console.warn(`[documents/list] ${suspects.length} rows missing from`
+              + ` the Drive walk for patient ${pid} - too many to verify,`
+              + ' showing all. Check the folder layout / date_subfolders.');
+          } else if (suspects.length) {
+            const gone = new Set();
+            for (const d of suspects) {
+              try {
+                const { data } = await drive.files.get({
+                  fileId: d.drive_file_id,
+                  fields: 'id,trashed',
+                  supportsAllDrives: true,
+                });
+                // Deleting in the Drive UI moves to the bin rather than
+                // erasing, so `trashed` is the usual signal; a 404 below is
+                // the permanent case.
+                if (data && data.trashed) gone.add(d.drive_file_id);
+              } catch (e) {
+                const status = e && e.code;
+                if (status === 404) gone.add(d.drive_file_id);
+                // Anything else — a rate limit, a network blip — leaves the
+                // document visible. Erring towards showing a record is the
+                // only acceptable direction here.
+              }
+            }
+            if (gone.size) {
+              docs = docs.filter((d) => !gone.has(d.drive_file_id) || d.drive_only);
+              console.log(`[documents/list] hid ${gone.size} document(s)`
+                + ` deleted from Drive for patient ${pid}`);
+            }
+          }
+        } catch (e) {
+          console.warn('[documents/list] deleted-file check skipped:', e.message);
+        }
+
         docs.sort((a, b) =>
           String(b.doc_date || '').localeCompare(String(a.doc_date || '')));
       }
@@ -887,6 +959,361 @@ router.delete('/:id(\\d+)', async (req, res) => {
     console.error('[documents/delete]', e);
     res.status(500).json({ error: 'Delete failed' });
   }
+});
+
+
+// ─────────────────────────────────────────────────────────────
+// Bundling a selection of documents into one PDF — as a BACKGROUND JOB.
+//
+// WHY IT IS A JOB AND NOT A REPLY
+// The obvious shape is "POST the ids, get the PDF back". It does not survive
+// contact with the real data. Forty documents means forty Drive downloads,
+// and every HEIC among them is decoded in pure JavaScript. That is minutes,
+// not seconds, against a server that cuts non-multipart requests off at
+// REQUEST_TIMEOUT_MS (60s by default). The doctor would watch a spinner and
+// then be told the request timed out, while the server carried on building a
+// PDF nobody would ever receive.
+//
+// So the POST starts the work and returns an id immediately. The client polls
+// for progress and fetches the file when it is ready. Nothing waits on a
+// socket that a proxy, a phone changing networks, or the timeout above can
+// close underneath it.
+//
+// WHY THE RESULT GOES TO DISK
+// pm2 restarts this process at 400MB (see ecosystem.config.cjs). Holding
+// finished PDFs in memory until someone downloads them is exactly how that
+// limit gets hit — and a restart mid-download loses the file anyway. The
+// bytes land in a temp directory; the registry below holds only status.
+//
+// Jobs are in memory, which is correct here specifically because pm2 runs
+// this as a single fork process. Under cluster mode the poll could reach a
+// worker that never saw the job, and this would need Postgres or Redis.
+// ─────────────────────────────────────────────────────────────
+
+// Deliberately modest. Each file is held in memory while it is embedded, and
+// a doctor selecting an entire history would otherwise ask the server to hold
+// a few hundred megabytes to answer one request.
+// Loaded at boot rather than on first use: parsing it costs ~400ms, and
+// that is time the first doctor to press Download should not pay.
+// heic-convert is deliberately NOT preloaded - 1.3s and a WASM heap for
+// something most selections never contain.
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+
+const PDF_MAX_DOCS = 40;
+
+const PDF_JOBS_DIR = path.join(__dirname, '..', 'uploads', 'pdf-jobs');
+if (!fs.existsSync(PDF_JOBS_DIR)) fs.mkdirSync(PDF_JOBS_DIR, { recursive: true });
+
+/// How long a finished PDF is kept. Long enough for a slow phone on clinic
+/// wifi to come back for it, short enough that the disk does not accumulate
+/// copies of every selection anyone ever made.
+const PDF_JOB_TTL_MS = 30 * 60 * 1000;
+
+/// One at a time. Two doctors each bundling thirty X-rays in parallel is the
+/// straightest path to the 400MB restart; queueing costs them a wait and
+/// costs everyone else nothing.
+let pdfBuilding = false;
+const pdfQueue = [];
+
+const pdfJobs = new Map();
+
+const A4 = { w: 595.28, h: 841.89 };
+const PAGE_MARGIN = 24;
+const CAPTION_H = 16;
+
+/// Sniff the real type from the bytes, not from the stored mime_type.
+///
+/// mime_type is whatever the uploading client claimed, and uploads that
+/// arrived as application/octet-stream are common enough here that trusting
+/// it would drop good images out of the PDF for no reason.
+function sniffType(buf) {
+  if (buf.length < 12) return 'unknown';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf.slice(0, 4).toString('latin1') === '%PDF') return 'pdf';
+  // ISO-BMFF: 4 bytes of size, then 'ftyp', then a brand. HEIC and the HEVC
+  // sequence brands an iPhone writes all live here.
+  if (buf.slice(4, 8).toString('latin1') === 'ftyp') {
+    const brand = buf.slice(8, 12).toString('latin1');
+    if (['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1'].includes(brand)) return 'heic';
+  }
+  return 'unknown';
+}
+
+/// The document's bytes: from disk when there is a local copy, from Drive
+/// otherwise — the same order of preference /:id/content uses.
+async function documentBytes(doc, adminId) {
+  if (doc.filename) {
+    const abs = path.join(DOCS_DIR, doc.filename);
+    if (fs.existsSync(abs)) return fs.readFileSync(abs);
+  }
+  if (!doc.drive_file_id) return null;
+  const drive = await D.getDriveForAdmin(adminId);
+  const dl = await drive.files.get(
+    { fileId: doc.drive_file_id, alt: 'media', supportsAllDrives: true },
+    { responseType: 'arraybuffer' });
+  return Buffer.from(dl.data);
+}
+
+function pdfJobCleanup() {
+  const now = Date.now();
+  for (const [id, job] of pdfJobs) {
+    if (now - job.createdAt < PDF_JOB_TTL_MS) continue;
+    if (job.path) {
+      try { fs.unlinkSync(job.path); } catch (_) { /* already gone */ }
+    }
+    pdfJobs.delete(id);
+  }
+
+  // Then the directory itself, not just what the registry remembers.
+  //
+  // The registry is in memory and pm2 restarts this process on its own
+  // (autorestart, and max_memory_restart at 400M). Every restart empties the
+  // map while the files stay on disk — and a sweep that only walks the map
+  // would never look at them again. Left alone that is an unbounded pile of
+  // patient documents on the server's disk.
+  try {
+    for (const name of fs.readdirSync(PDF_JOBS_DIR)) {
+      if (!name.endsWith('.pdf')) continue;
+      const abs = path.join(PDF_JOBS_DIR, name);
+      try {
+        if (now - fs.statSync(abs).mtimeMs > PDF_JOB_TTL_MS) fs.unlinkSync(abs);
+      } catch (_) { /* vanished under us, or in use - next pass */ }
+    }
+  } catch (e) {
+    console.warn('[documents/pdf] could not sweep job dir:', e.message);
+  }
+}
+
+// Once at boot as well as on the timer: anything already in there belongs to
+// a process that is gone, since jobs never survive a restart. Waiting five
+// minutes to clear it would keep the previous life's files around for no
+// reason.
+pdfJobCleanup();
+// unref so a quiet server can still exit; this must never be the reason the
+// process stays alive.
+setInterval(pdfJobCleanup, 5 * 60 * 1000).unref();
+
+/// Build one job to completion. Never throws: the outcome is recorded on the
+/// job, because nobody is waiting on this promise.
+async function runPdfJob(job) {
+  try {
+    const { rows } = await query(
+      `SELECT id, patient_id, filename, original_name, title, mime_type,
+              doc_date, category, drive_file_id
+         FROM patient_documents
+        WHERE id = ANY($1::int[]) AND deleted_at IS NULL`, [job.ids]);
+    if (!rows.length) throw new Error('No documents found');
+
+    // Honour the order the doctor selected them in, not whatever order
+    // Postgres returned — a report assembled in a surprising order is one
+    // somebody has to redo by hand.
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const docs = job.ids.map((id) => byId.get(id)).filter(Boolean);
+    job.total = docs.length;
+
+    const out = await PDFDocument.create();
+    const font = await out.embedFont(StandardFonts.Helvetica);
+
+    for (const doc of docs) {
+      const label = doc.title || doc.original_name || ('Document ' + doc.id);
+      let buf;
+      try {
+        buf = await documentBytes(doc, job.adminId);
+      } catch (e) {
+        console.warn('[documents/pdf] could not read', doc.id, e.message);
+        job.skipped++;
+        job.done++;
+        continue;
+      }
+      if (!buf || !buf.length) { job.skipped++; job.done++; continue; }
+
+      let kind = sniffType(buf);
+
+      if (kind === 'heic') {
+        try {
+          const convert = require('heic-convert');
+          buf = Buffer.from(await convert({ buffer: buf, format: 'JPEG', quality: 0.92 }));
+          kind = 'jpeg';
+        } catch (e) {
+          console.warn('[documents/pdf] HEIC convert failed', doc.id, e.message);
+          job.skipped++;
+          job.done++;
+          continue;
+        }
+      }
+
+      if (kind === 'pdf') {
+        // Copy the pages as they are. Rasterising them would throw away the
+        // text layer of a report that had one.
+        try {
+          const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+          const pages = await out.copyPages(src, src.getPageIndices());
+          pages.forEach((pg) => out.addPage(pg));
+        } catch (e) {
+          console.warn('[documents/pdf] could not merge PDF', doc.id, e.message);
+          job.skipped++;
+        }
+        job.done++;
+        continue;
+      }
+
+      if (kind !== 'jpeg' && kind !== 'png') { job.skipped++; job.done++; continue; }
+
+      try {
+        const img = kind === 'jpeg' ? await out.embedJpg(buf) : await out.embedPng(buf);
+        const page = out.addPage([A4.w, A4.h]);
+
+        // Fit inside the margins, keeping aspect. Never scaled UP: blowing a
+        // small photo up to page width makes it look worse, not bigger.
+        const maxW = A4.w - PAGE_MARGIN * 2;
+        const maxH = A4.h - PAGE_MARGIN * 2 - CAPTION_H;
+        const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+        const w = img.width * scale;
+        const h = img.height * scale;
+
+        page.drawImage(img, {
+          x: (A4.w - w) / 2,
+          y: PAGE_MARGIN + CAPTION_H + (maxH - h) / 2,
+          width: w,
+          height: h,
+        });
+
+        // A page of a clinical PDF with nothing identifying it is a page
+        // somebody will later have to guess about.
+        const date = doc.doc_date ? String(doc.doc_date).slice(0, 10) : '';
+        const caption = [date, label].filter(Boolean).join('  -  ').slice(0, 120);
+        page.drawText(caption, {
+          x: PAGE_MARGIN,
+          y: PAGE_MARGIN,
+          size: 8,
+          font,
+          color: rgb(0.35, 0.35, 0.35),
+        });
+      } catch (e) {
+        console.warn('[documents/pdf] could not embed', doc.id, e.message);
+        job.skipped++;
+      }
+      job.done++;
+    }
+
+    if (out.getPageCount() === 0) {
+      throw new Error('None of the selected files could be put into a PDF.');
+    }
+
+    const bytes = Buffer.from(await out.save());
+    const abs = path.join(PDF_JOBS_DIR, job.id + '.pdf');
+    fs.writeFileSync(abs, bytes);
+    job.path = abs;
+    job.pages = out.getPageCount();
+    job.bytes = bytes.length;
+    job.status = 'ready';
+    console.log(`[documents/pdf] job ${job.id} ready: ${job.pages} pages from `
+      + `${job.total} docs, skipped ${job.skipped}, ${(bytes.length / 1024).toFixed(0)}KB`);
+  } catch (e) {
+    job.status = 'failed';
+    job.error = e.message || 'Could not build the PDF.';
+    console.error('[documents/pdf] job', job.id, 'failed:', e.message);
+  }
+}
+
+function pumpPdfQueue() {
+  if (pdfBuilding) return;
+  const job = pdfQueue.shift();
+  if (!job) return;
+  pdfBuilding = true;
+  job.status = 'working';
+  runPdfJob(job).finally(() => {
+    pdfBuilding = false;
+    pumpPdfQueue();
+  });
+}
+
+/// Only the person who asked for it may see it. These bundles are patient
+/// records; a job id guessed or shared must not be a way around that.
+function ownsJob(req, job) {
+  return job && job.userId === (req.user && req.user.id)
+    && job.userRole === (req.user && req.user.role);
+}
+
+// POST /api/documents/pdf   { ids: [...] }  ->  202 { job_id }
+router.post('/pdf', async (req, res) => {
+  const rawIds = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
+  const ids = [...new Set(rawIds.map(Number).filter(Number.isInteger))];
+  if (!ids.length) return res.status(400).json({ error: 'ids required' });
+  if (ids.length > PDF_MAX_DOCS) {
+    return res.status(400).json({
+      error: 'Too many documents at once - select ' + PDF_MAX_DOCS + ' or fewer.',
+    });
+  }
+
+  const job = {
+    id: crypto.randomBytes(9).toString('hex'),
+    ids,
+    userId: req.user && req.user.id,
+    userRole: req.user && req.user.role,
+    adminId: req.user && req.user.role === 'admin' ? req.user.id : null,
+    status: 'queued',
+    done: 0,
+    total: ids.length,
+    skipped: 0,
+    pages: 0,
+    bytes: 0,
+    path: null,
+    error: null,
+    createdAt: Date.now(),
+  };
+  pdfJobs.set(job.id, job);
+  pdfQueue.push(job);
+  // setImmediate, not a direct call: the reply below is written first, and
+  // only then does anything start. A direct call would run the new job up to
+  // its first await INSIDE this request - which is exactly the waiting this
+  // endpoint exists to avoid.
+  setImmediate(pumpPdfQueue);
+
+  console.log(`[documents/pdf] job ${job.id} queued: ${ids.length} docs`);
+  res.status(202).json({ job_id: job.id, total: job.total });
+});
+
+// GET /api/documents/pdf/:jobId  -> progress, or where to fetch it
+router.get('/pdf/:jobId([a-f0-9]{18})', async (req, res) => {
+  const job = pdfJobs.get(req.params.jobId);
+  if (!job) {
+    // Expired and deleted, or a restart lost it. Either way the client should
+    // start again rather than poll forever.
+    return res.status(404).json({ error: 'This bundle has expired. Try again.' });
+  }
+  if (!ownsJob(req, job)) return res.status(403).json({ error: 'Forbidden' });
+  res.json({
+    status: job.status,
+    done: job.done,
+    total: job.total,
+    skipped: job.skipped,
+    pages: job.pages,
+    bytes: job.bytes,
+    error: job.error,
+  });
+});
+
+// GET /api/documents/pdf/:jobId/file  -> the PDF itself
+router.get('/pdf/:jobId([a-f0-9]{18})/file', async (req, res) => {
+  const job = pdfJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'This bundle has expired. Try again.' });
+  if (!ownsJob(req, job)) return res.status(403).json({ error: 'Forbidden' });
+  if (job.status !== 'ready' || !job.path || !fs.existsSync(job.path)) {
+    return res.status(409).json({ error: 'Not ready yet.', status: job.status });
+  }
+
+  const stamp = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' })
+    .format(new Date());
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition',
+    'attachment; filename="documents_' + stamp + '.pdf"');
+  res.setHeader('X-Skipped-Count', String(job.skipped));
+  res.setHeader('Access-Control-Expose-Headers', 'X-Skipped-Count, Content-Disposition');
+  // Kept, not deleted on send: a download that drops halfway on clinic wifi
+  // should be retryable. The TTL sweep clears it.
+  res.sendFile(job.path);
 });
 
 module.exports = router;
