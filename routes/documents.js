@@ -844,6 +844,194 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/content', async (req, res) => {
   }
 });
 
+
+// ── Sized previews ─────────────────────────────────────────────────────────
+//
+// The grid's thumbnail is ~220px: fine for a tile, useless full screen. The
+// original is 3-4MB and takes seconds to arrive over a clinic connection.
+// There was nothing in between, so opening a photo meant waiting for the
+// whole original every time.
+//
+// Drive already renders any size on demand. Its thumbnailLink carries a size
+// suffix — `=s220` — and asking for `=s1600` returns a 1600px rendition of
+// the same picture, typically 100-200KB against the original's several
+// megabytes. Same image, a tenth of the wait, and quite good enough to read
+// a posture photo on screen.
+//
+// So: previews for looking, originals only when something actually needs the
+// real pixels (a download, a copy, a deep zoom).
+
+/// Rewrite Drive's thumbnail URL to ask for a different size.
+///
+/// The link ends in a parameter block after the last '=' — usually `s220`,
+/// sometimes `w220-h220-p`. Replacing that whole block is what makes Google
+/// re-render; appending a second one is ignored.
+function sizedThumbLink(link, size) {
+  if (!link) return link;
+  const n = Math.max(64, Math.min(2048, Number(size) || 1600));
+  return link.includes('=')
+    ? link.replace(/=[^=/]*$/, '=s' + n)
+    : link + '=s' + n;
+}
+
+/// thumbnailLink per file, so the metadata call is paid once and not on
+/// every preview.
+///
+/// Fetching a preview was two round trips to Google: one to ask where the
+/// rendition lives, one to fetch it. The first answer does not change while
+/// the file does not, and a doctor stepping through a folder asks for the
+/// same handful of files repeatedly — so it is cached. Ten minutes is short
+/// enough that a re-uploaded file corrects itself without anyone thinking
+/// about it.
+const THUMB_LINK_TTL_MS = 10 * 60 * 1000;
+const thumbLinkCache = new Map();
+
+function cachedThumbLink(fileId) {
+  const hit = thumbLinkCache.get(fileId);
+  if (!hit) return null;
+  if (Date.now() - hit.at > THUMB_LINK_TTL_MS) {
+    thumbLinkCache.delete(fileId);
+    return null;
+  }
+  return hit.link;
+}
+
+/// Fetch a rendition of a Drive file at [size], or null if there is none.
+///
+/// Never throws — a preview is an optimisation, and every caller has a
+/// perfectly good fallback in the original file.
+async function drivePreview(drive, fileId, size) {
+  const t0 = Date.now();
+  let link = cachedThumbLink(fileId);
+  const cached = !!link;
+  if (!link) {
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'thumbnailLink,mimeType',
+      supportsAllDrives: true,
+    });
+    link = meta.data.thumbnailLink;
+    if (!link) return null;
+    // Bounded, so a long session on a big clinic does not grow this without
+    // limit. Oldest-inserted goes first; Map preserves insertion order.
+    if (thumbLinkCache.size > 500) {
+      thumbLinkCache.delete(thumbLinkCache.keys().next().value);
+    }
+    thumbLinkCache.set(fileId, { link, at: Date.now() });
+  }
+  const tMeta = Date.now();
+
+  const token = await D.accessTokenFor(drive);
+  const url = sizedThumbLink(link, size);
+  let r = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  // A minority of links (older files, some shared drives) are plain public
+  // URLs that 401 when handed a token they did not ask for.
+  if (!r.ok && token) r = await fetch(url);
+  if (!r.ok) {
+    // A link can go stale before the TTL — a re-upload changes it. Drop it so
+    // the next attempt asks Drive again instead of failing the same way.
+    if (cached) thumbLinkCache.delete(fileId);
+    return null;
+  }
+  const buffer = Buffer.from(await r.arrayBuffer());
+
+  // Printed so the question "how long does a preview take?" has an answer
+  // from the actual clinic connection rather than an estimate.
+  console.log(`[documents/preview] ${fileId} ${(buffer.length / 1024).toFixed(0)}KB`
+    + ` in ${Date.now() - t0}ms (link ${cached ? 'cached' : tMeta - t0 + 'ms'},`
+    + ` image ${Date.now() - tMeta}ms)`);
+
+  return {
+    buffer,
+    type: r.headers.get('content-type') || 'image/jpeg',
+  };
+}
+
+// GET /api/documents/:id/preview?size=1600
+//
+// A middle size for a document that has a row. Falls back to the original
+// when the file has not reached Drive yet — a photo taken a minute ago has
+// no Drive rendition, and waiting for one would be slower than the file.
+router.get('/:id(\\d+)/preview', async (req, res) => {
+  const id = +req.params.id;
+  const size = req.query.size;
+  try {
+    const { rows } = await query(
+      `SELECT id, filename, mime_type, drive_file_id
+         FROM patient_documents WHERE id=$1 AND deleted_at IS NULL`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const d = rows[0];
+
+    if (d.drive_file_id) {
+      const drive = await D.getDriveForAdmin(
+        req.user && req.user.role === 'admin' ? req.user.id : null);
+      const prev = await drivePreview(drive, d.drive_file_id, size);
+      if (prev) {
+        res.type(prev.type);
+        // Renditions are immutable for a given file and size.
+        res.setHeader('Cache-Control', 'private, max-age=86400');
+        return res.send(prev.buffer);
+      }
+    }
+
+    // No rendition: hand back the real file rather than an error, so the
+    // caller never has to special-case this.
+    if (d.filename) {
+      const abs = path.join(DOCS_DIR, d.filename);
+      if (fs.existsSync(abs)) {
+        if (d.mime_type) res.type(d.mime_type);
+        res.setHeader('Cache-Control', 'private, max-age=86400');
+        return res.sendFile(abs);
+      }
+    }
+    if (!d.drive_file_id) {
+      return res.status(404).json({ error: 'No stored file', code: 'no_content' });
+    }
+    const drive = await D.getDriveForAdmin(
+      req.user && req.user.role === 'admin' ? req.user.id : null);
+    const dl = await drive.files.get(
+      { fileId: d.drive_file_id, alt: 'media', supportsAllDrives: true },
+      { responseType: 'arraybuffer' });
+    if (d.mime_type) res.type(d.mime_type);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(Buffer.from(dl.data));
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[documents/preview]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+// GET /api/documents/drive/:fileId/preview?size=1600
+//
+// Same thing for a file that has no row at all — which, in a clinic folder
+// full of photos put straight into Drive, is most of them.
+router.get('/drive/:fileId([A-Za-z0-9_-]+)/preview', async (req, res) => {
+  try {
+    const drive = await D.getDriveForAdmin(
+      req.user.role === 'admin' ? req.user.id : null);
+    const prev = await drivePreview(drive, req.params.fileId, req.query.size);
+    if (prev) {
+      res.type(prev.type);
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      return res.send(prev.buffer);
+    }
+    // Nothing rendered: stream the original.
+    const dl = await drive.files.get(
+      { fileId: req.params.fileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'arraybuffer' });
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(Buffer.from(dl.data));
+  } catch (e) {
+    const err = D.classifyDriveError(e);
+    console.error('[documents/drive-preview]', err.message);
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+
 // GET /api/documents/drive/:fileId/thumb   — Drive's own thumbnail, proxied
 //
 // Drive generates a small preview image for most files (including PDFs) and
@@ -1098,25 +1286,47 @@ setInterval(pdfJobCleanup, 5 * 60 * 1000).unref();
 /// job, because nobody is waiting on this promise.
 async function runPdfJob(job) {
   try {
-    const { rows } = await query(
-      `SELECT id, patient_id, filename, original_name, title, mime_type,
-              doc_date, category, drive_file_id
-         FROM patient_documents
-        WHERE id = ANY($1::int[]) AND deleted_at IS NULL`, [job.ids]);
-    if (!rows.length) throw new Error('No documents found');
+    const wantedIds = job.items.filter((i) => i.id).map((i) => i.id);
+    let byId = new Map();
+    if (wantedIds.length) {
+      const { rows } = await query(
+        `SELECT id, patient_id, filename, original_name, title, mime_type,
+                doc_date, category, drive_file_id
+           FROM patient_documents
+          WHERE id = ANY($1::int[]) AND deleted_at IS NULL`, [wantedIds]);
+      byId = new Map(rows.map((r) => [r.id, r]));
+    }
 
-    // Honour the order the doctor selected them in, not whatever order
-    // Postgres returned — a report assembled in a surprising order is one
-    // somebody has to redo by hand.
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const docs = job.ids.map((id) => byId.get(id)).filter(Boolean);
+    // Built in the order the doctor selected them, not the order Postgres
+    // returned — a bundle whose pages run in a surprising order is one
+    // somebody has to redo by hand. Drive-only entries are turned into the
+    // same shape a row has, so everything downstream treats them alike.
+    const docs = [];
+    for (const it of job.items) {
+      if (it.id) {
+        const row = byId.get(it.id);
+        if (row) docs.push(row);
+        continue;
+      }
+      docs.push({
+        id: null,
+        filename: null,
+        drive_file_id: it.driveId,
+        original_name: it.name,
+        title: it.name,
+        doc_date: it.date,
+        mime_type: null,
+      });
+    }
+    if (!docs.length) throw new Error('No documents found');
     job.total = docs.length;
 
     const out = await PDFDocument.create();
     const font = await out.embedFont(StandardFonts.Helvetica);
 
     for (const doc of docs) {
-      const label = doc.title || doc.original_name || ('Document ' + doc.id);
+      const label = doc.title || doc.original_name
+        || ('Document ' + (doc.id || doc.drive_file_id));
       let buf;
       try {
         buf = await documentBytes(doc, job.adminId);
@@ -1238,10 +1448,44 @@ function ownsJob(req, job) {
 
 // POST /api/documents/pdf   { ids: [...] }  ->  202 { job_id }
 router.post('/pdf', async (req, res) => {
-  const rawIds = Array.isArray((req.body || {}).ids) ? req.body.ids : [];
-  const ids = [...new Set(rawIds.map(Number).filter(Number.isInteger))];
-  if (!ids.length) return res.status(400).json({ error: 'ids required' });
-  if (ids.length > PDF_MAX_DOCS) {
+  // Two kinds of thing can be selected, and the second is the common one.
+  //
+  // A clinic folder is mostly files that were put into Drive directly -
+  // WhatsApp photos, scans dropped in from a desktop. Those have no
+  // patient_documents row at all, so an endpoint that took document ids
+  // could not bundle the majority of what a doctor sees on the page.
+  //
+  // `items` therefore carries either { id } for a real row or
+  // { drive_id, name, date } for a file that lives only in Drive. `ids` is
+  // still accepted so nothing older breaks.
+  const body = req.body || {};
+  const rawItems = Array.isArray(body.items)
+    ? body.items
+    : (Array.isArray(body.ids) ? body.ids.map((id) => ({ id })) : []);
+
+  const seen = new Set();
+  const items = [];
+  for (const it of rawItems) {
+    if (!it || typeof it !== 'object') continue;
+    if (it.id != null && Number.isInteger(Number(it.id)) && Number(it.id) > 0) {
+      const key = 'd:' + Number(it.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({ id: Number(it.id) });
+    } else if (typeof it.drive_id === 'string' && /^[A-Za-z0-9_-]{5,}$/.test(it.drive_id)) {
+      const key = 'g:' + it.drive_id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        driveId: it.drive_id,
+        name: textOrNull(it.name, 200),
+        date: textOrNull(it.date, 20),
+      });
+    }
+  }
+
+  if (!items.length) return res.status(400).json({ error: 'Nothing to bundle.' });
+  if (items.length > PDF_MAX_DOCS) {
     return res.status(400).json({
       error: 'Too many documents at once - select ' + PDF_MAX_DOCS + ' or fewer.',
     });
@@ -1249,13 +1493,13 @@ router.post('/pdf', async (req, res) => {
 
   const job = {
     id: crypto.randomBytes(9).toString('hex'),
-    ids,
+    items,
     userId: req.user && req.user.id,
     userRole: req.user && req.user.role,
     adminId: req.user && req.user.role === 'admin' ? req.user.id : null,
     status: 'queued',
     done: 0,
-    total: ids.length,
+    total: items.length,
     skipped: 0,
     pages: 0,
     bytes: 0,
@@ -1271,7 +1515,7 @@ router.post('/pdf', async (req, res) => {
   // endpoint exists to avoid.
   setImmediate(pumpPdfQueue);
 
-  console.log(`[documents/pdf] job ${job.id} queued: ${ids.length} docs`);
+  console.log(`[documents/pdf] job ${job.id} queued: ${items.length} items`);
   res.status(202).json({ job_id: job.id, total: job.total });
 });
 
