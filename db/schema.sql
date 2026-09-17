@@ -106,9 +106,13 @@ CREATE TABLE IF NOT EXISTS body_image_alignments_global (
     offset_x         NUMERIC(8,6) NOT NULL DEFAULT 0,
     offset_y         NUMERIC(8,6) NOT NULL DEFAULT 0,
     scale            NUMERIC(8,6) NOT NULL DEFAULT 1,
+    scale_x          NUMERIC(8,6) NOT NULL DEFAULT 1,
+    scale_y          NUMERIC(8,6) NOT NULL DEFAULT 1,
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (source_image_id, target_image_id)
 );
+ALTER TABLE body_image_alignments_global ADD COLUMN IF NOT EXISTS scale_x NUMERIC(8,6) NOT NULL DEFAULT 1;
+ALTER TABLE body_image_alignments_global ADD COLUMN IF NOT EXISTS scale_y NUMERIC(8,6) NOT NULL DEFAULT 1;
 
 -- ── Treatment Sessions (per patient, per date) ─────────────
 CREATE TABLE IF NOT EXISTS treatment_sessions (

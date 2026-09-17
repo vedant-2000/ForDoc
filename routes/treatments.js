@@ -324,7 +324,8 @@ router.get('/patients/:patientId/all', async (req, res) => {
     const { rows: alignments } = await query(
       `SELECT source_image_id, target_image_id,
               offset_x::float AS offset_x, offset_y::float AS offset_y,
-              scale::float AS scale
+              scale::float AS scale, scale_x::float AS scale_x,
+              scale_y::float AS scale_y
          FROM body_image_alignments_global
         WHERE target_image_id = (SELECT id FROM body_images WHERE is_active=TRUE LIMIT 1)`,
       []
