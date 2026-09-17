@@ -97,6 +97,52 @@ router.get('/', authRequired(['admin'], { screen: 'images' }), async (_req, res)
   }
 });
 
+// GET/PUT image geometry alignment. An admin sets this once per old/current
+// image pair; All Treatments applies it for every patient.
+router.get('/alignments/all', authRequired(['admin'], { screen: 'images' }), async (_req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT source_image_id, target_image_id, offset_x::float AS offset_x,
+              offset_y::float AS offset_y, scale::float AS scale
+         FROM body_image_alignments_global
+        WHERE target_image_id = (SELECT id FROM body_images WHERE is_active=TRUE LIMIT 1)`
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: 'Could not load alignments' });
+  }
+});
+
+router.put('/alignments', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
+  const source = Number(req.body?.source_image_id);
+  const target = Number(req.body?.target_image_id);
+  const clamp = (v, lo, hi, fallback) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : fallback;
+  };
+  if (!Number.isInteger(source) || !Number.isInteger(target) || source === target) {
+    return res.status(400).json({ error: 'Valid different source and target images are required' });
+  }
+  try {
+    const { rows } = await query(
+      `INSERT INTO body_image_alignments_global
+         (source_image_id, target_image_id, offset_x, offset_y, scale)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (source_image_id, target_image_id) DO UPDATE
+         SET offset_x=EXCLUDED.offset_x, offset_y=EXCLUDED.offset_y,
+             scale=EXCLUDED.scale, updated_at=NOW()
+       RETURNING source_image_id, target_image_id, offset_x::float AS offset_x,
+                 offset_y::float AS offset_y, scale::float AS scale`,
+      [source, target, clamp(req.body?.offset_x, -1, 1, 0),
+       clamp(req.body?.offset_y, -1, 1, 0), clamp(req.body?.scale, .25, 4, 1)]
+    );
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('[images/alignment/put]', e);
+    res.status(500).json({ error: 'Alignment save failed' });
+  }
+});
+
 // POST /api/images  (admin) — upload + auto-activate
 //  multipart field 'file'; optional width_px/height_px body fields
 router.post('/', authRequired(['admin'], { screen: 'images' }), upload.single('file'), async (req, res) => {

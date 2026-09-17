@@ -325,8 +325,9 @@ router.get('/patients/:patientId/all', async (req, res) => {
       `SELECT source_image_id, target_image_id,
               offset_x::float AS offset_x, offset_y::float AS offset_y,
               scale::float AS scale
-         FROM body_image_alignments WHERE patient_id=$1`,
-      [pid]
+         FROM body_image_alignments_global
+        WHERE target_image_id = (SELECT id FROM body_images WHERE is_active=TRUE LIMIT 1)`,
+      []
     );
     if (!sessions.length) return res.json({ sessions: [], alignments });
 
