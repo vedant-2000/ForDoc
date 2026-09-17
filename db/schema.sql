@@ -84,6 +84,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_body_images_one_active
 -- so they sit in the empty space around the silhouette instead of on top of it.
 ALTER TABLE body_images ADD COLUMN IF NOT EXISTS blank_mask_filename TEXT;
 
+-- All-treatments-only mapping used when a patient's history spans more than
+-- one body diagram.  Marks themselves remain untouched; this affine mapping
+-- is applied only while projecting an older diagram onto the latest one.
+CREATE TABLE IF NOT EXISTS body_image_alignments (
+    patient_id       INT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    source_image_id  INT NOT NULL REFERENCES body_images(id) ON DELETE CASCADE,
+    target_image_id  INT NOT NULL REFERENCES body_images(id) ON DELETE CASCADE,
+    offset_x         NUMERIC(8,6) NOT NULL DEFAULT 0,
+    offset_y         NUMERIC(8,6) NOT NULL DEFAULT 0,
+    scale            NUMERIC(8,6) NOT NULL DEFAULT 1,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (patient_id, source_image_id, target_image_id)
+);
+
 -- ── Treatment Sessions (per patient, per date) ─────────────
 CREATE TABLE IF NOT EXISTS treatment_sessions (
     id              SERIAL PRIMARY KEY,

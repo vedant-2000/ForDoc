@@ -321,7 +321,14 @@ router.get('/patients/:patientId/all', async (req, res) => {
         ORDER BY s.session_date ASC, s.id ASC`,
       [pid]
     );
-    if (!sessions.length) return res.json({ sessions: [] });
+    const { rows: alignments } = await query(
+      `SELECT source_image_id, target_image_id,
+              offset_x::float AS offset_x, offset_y::float AS offset_y,
+              scale::float AS scale
+         FROM body_image_alignments WHERE patient_id=$1`,
+      [pid]
+    );
+    if (!sessions.length) return res.json({ sessions: [], alignments });
 
     const ids = sessions.map(s => s.id);
     const { rows: marks } = await query(
@@ -342,10 +349,42 @@ router.get('/patients/:patientId/all', async (req, res) => {
     );
     const byId = Object.fromEntries(sessions.map(s => [s.id, { ...s, marks: [] }]));
     marks.forEach(m => { if (byId[m.session_id]) byId[m.session_id].marks.push(m); });
-    res.json({ sessions: sessions.map(s => byId[s.id]) });
+    res.json({ sessions: sessions.map(s => byId[s.id]), alignments });
   } catch (e) {
     console.error('[treatments/all]', e);
     res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PUT /api/treatments/patients/:patientId/body-alignment
+// This never changes clinical marks.  It only saves how an old image is
+// projected onto the latest image in the All Treatments screen.
+router.put('/patients/:patientId/body-alignment', async (req, res) => {
+  const pid = +req.params.patientId;
+  const source = Number(req.body?.source_image_id);
+  const target = Number(req.body?.target_image_id);
+  const ox = clamp(req.body?.offset_x, -1, 1, 0);
+  const oy = clamp(req.body?.offset_y, -1, 1, 0);
+  const scale = clamp(req.body?.scale, 0.25, 4, 1);
+  if (!Number.isInteger(source) || !Number.isInteger(target) || source === target) {
+    return res.status(400).json({ error: 'Valid different source and target images are required' });
+  }
+  try {
+    const { rows } = await query(
+      `INSERT INTO body_image_alignments
+         (patient_id, source_image_id, target_image_id, offset_x, offset_y, scale)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (patient_id, source_image_id, target_image_id) DO UPDATE
+         SET offset_x=EXCLUDED.offset_x, offset_y=EXCLUDED.offset_y,
+             scale=EXCLUDED.scale, updated_at=NOW()
+       RETURNING source_image_id, target_image_id, offset_x::float AS offset_x,
+                 offset_y::float AS offset_y, scale::float AS scale`,
+      [pid, source, target, ox, oy, scale]
+    );
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('[body-alignment/put]', e);
+    res.status(500).json({ error: 'Alignment save failed' });
   }
 });
 
@@ -353,6 +392,11 @@ function clamp01(v) {
   const n = Number(v);
   if (!isFinite(n)) return 0;
   return Math.max(0, Math.min(1, n));
+}
+
+function clamp(v, min, max, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
 }
 
 function clampSize(v) {
