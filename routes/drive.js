@@ -801,7 +801,7 @@ router.post('/settings/preview', authRequired(['admin'], { screen: 'drive' }), a
       name: b.sample_name || 'Sample Patient',
       year: yyyy,
       month: yyyy + '-' + mm,
-      date: yyyy + '-' + mm + '-' + dd,
+      date: dd + '-' + mm + '-' + yyyy,
       category: D.categoryFolderName(b.sample_category || 'xray'),
     };
     const segs = [];

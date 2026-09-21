@@ -1073,7 +1073,7 @@ function patientVars({ patientCode, patientName, category, docDate }) {
     name: patientName || '',
     year: yyyy,
     month: `${yyyy}-${mm}`,
-    date: `${yyyy}-${mm}-${dd}`,
+    date: `${dd}-${mm}-${yyyy}`,
     category: categoryFolderName(category || 'other'),
   };
 }
