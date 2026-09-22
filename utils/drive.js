@@ -416,13 +416,59 @@ async function accessTokenFor(drive) {
   }
 }
 
-async function listFolders(drive, opts = {}) {
-  const { parentId = 'root', q = '', fresh = false, everywhere = false } = opts;
-  const owner = driveOwner(drive);
+function folderListKey(drive, { parentId = 'root', q = '', everywhere = false } = {}) {
   // '*' keys the drive-wide listing separately from any single parent's.
-  const key = `folders:${owner}:${everywhere ? '*' : parentId}:${q}`;
+  return `folders:${driveOwner(drive)}:${everywhere ? '*' : parentId}:${q}`;
+}
+
+async function listFolders(drive, opts = {}) {
+  const { fresh = false } = opts;
+  const key = folderListKey(drive, opts);
   if (fresh) cache.bust(key);
   return cache.get(key, FOLDER_TTL_MS, () => listFoldersUncached(drive, opts));
+}
+
+// Listings being re-read in the background, by cache key.
+const folderRefreshes = new Map();
+
+/**
+ * Re-read a folder listing WITHOUT making anyone wait for it.
+ *
+ * listFolders({ fresh: true }) busts the cached listing and fetches a new one
+ * in-line — and because the cache is single-flight, every other request for
+ * that listing then waits behind the same fetch. For the base folder of a
+ * clinic Drive that is thousands of folders and a request that outlives the
+ * 60-second timeout.
+ *
+ * This keeps serving the listing that is already cached while a fresh one is
+ * fetched, and swaps the new one in when it lands (stale-while-revalidate).
+ * With nothing cached yet it does nothing: an ordinary listFolders call has
+ * to fetch then anyway, and doing both would read the Drive twice.
+ *
+ * Returns the in-flight promise, or null if there was nothing to refresh.
+ */
+function refreshFoldersInBackground(drive, opts = {}) {
+  const key = folderListKey(drive, opts);
+  const inFlight = folderRefreshes.get(key);
+  if (inFlight) return inFlight;
+  if (cache.peek(key) === undefined) return null;
+
+  const p = listFoldersUncached(drive, opts)
+    .then((list) => {
+      cache.put(key, FOLDER_TTL_MS, Promise.resolve(list));
+      return list;
+    })
+    .finally(() => folderRefreshes.delete(key));
+  // Nothing may await this; an unhandled rejection would reach the process
+  // net in server.js.
+  p.catch((e) => console.warn('[drive] background folder refresh failed:', e.message));
+  folderRefreshes.set(key, p);
+  return p;
+}
+
+/// Whether a background re-read of this listing is still running.
+function folderRefreshRunning(drive, opts = {}) {
+  return folderRefreshes.has(folderListKey(drive, opts));
 }
 
 // ===========================================================
@@ -434,11 +480,23 @@ async function listFolders(drive, opts = {}) {
 // it passes MAX_ENTRIES, and an index the owner expects to stand until they
 // resync it must not be evicted to make room for a folder listing.
 //
-// There is no expiry. Re-reading every folder name in a Drive is the owner's
-// call, not a timer's - they press Resync in Admin -> Google Drive when they
-// have reorganised something there. The trade is explicit: a folder created
-// by hand in Drive stays invisible to matching until then.
-const inventories = new Map();   // owner -> { inv, building }
+// It refreshes ITSELF, lazily. It used to have no expiry at all - re-reading
+// was left to the owner pressing Resync - and the cost of that showed up as
+// "creating a patient sometimes misses the folder": any folder made by hand
+// in Drive after the index was built stayed invisible until a restart or a
+// Resync nobody remembered to press, so the create dialog offered no match
+// and a second folder got made.
+//
+// Now an index older than INVENTORY_REFRESH_MS is re-read in the background
+// the next time anything asks for it (stale-while-revalidate). Callers keep
+// getting the current index instantly; the new one replaces it when it lands.
+// No timer: an idle server reads nothing from Google.
+const inventories = new Map();   // owner -> { inv, building, notes }
+const INVENTORY_REFRESH_MS = 15 * 60 * 1000;
+// A refresh that failed (Drive down, token expired) leaves the old index in
+// place - still stale - so without this every request would start another
+// full enumeration straight away and hammer Google while it is struggling.
+const INVENTORY_RETRY_MS = 2 * 60 * 1000;
 
 /**
  * EVERY folder in the Drive — id, name, parents — plus an index of the
@@ -543,10 +601,16 @@ async function folderInventory(drive, { fresh = false } = {}) {
  * this folder through one still re-validates against the CURRENT name, so a
  * stale token can only cost a rejected candidate, never a wrong match.
  */
-function noteFolderChanged(drive, { id, name, parents }) {
+function noteFolderChanged(drive, change) {
   const slot = inventories.get(driveOwner(drive));
-  if (!slot || !slot.inv || !id) return;
-  const inv = slot.inv;
+  if (!slot || !change || !change.id) return;
+  // A rebuild in flight started listing before this change, so it may come
+  // back without it. Remember it and replay it onto the new index.
+  if (slot.building) slot.notes.push(change);
+  if (slot.inv) applyFolderNote(slot.inv, change);
+}
+
+function applyFolderNote(inv, { id, name, parents }) {
   let f = inv.byId.get(id);
   if (!f) {
     f = { id, name: name || '', parents: parents || [] };
@@ -566,7 +630,22 @@ function noteFolderChanged(drive, { id, name, parents }) {
 
 function folderInventoryReady(drive) {
   const slot = inventories.get(driveOwner(drive));
-  return (slot && slot.inv) || null;
+  const inv = (slot && slot.inv) || null;
+  // Old enough to have missed folders made in Drive since: re-read it behind
+  // this caller, who still gets the current one without waiting.
+  if (inv && !slot.building
+      && Date.now() - inv.fetched_at > INVENTORY_REFRESH_MS
+      && Date.now() - (slot.lastStarted || 0) > INVENTORY_RETRY_MS) {
+    startFolderInventory(drive, { fresh: true, reason: 'refresh' });
+  }
+  return inv;
+}
+
+/// Whether a (re)build of the index is running right now - including a
+/// refresh behind an index that is still being served.
+function folderInventoryBuilding(drive) {
+  const slot = inventories.get(driveOwner(drive));
+  return !!(slot && slot.building);
 }
 
 /**
@@ -577,11 +656,11 @@ function folderInventoryReady(drive) {
  * nothing awaits this promise, and an unhandled rejection would reach the
  * process-level net in server.js.
  */
-function startFolderInventory(drive, { fresh = false } = {}) {
+function startFolderInventory(drive, { fresh = false, reason = '' } = {}) {
   const owner = driveOwner(drive);
   let slot = inventories.get(owner);
   if (!slot) {
-    slot = { inv: null, building: null };
+    slot = { inv: null, building: null, notes: [] };
     inventories.set(owner, slot);
   }
   // Already built and nobody asked for a re-read: nothing to do. This is the
@@ -604,10 +683,18 @@ function startFolderInventory(drive, { fresh = false } = {}) {
   }
 
   const started = Date.now();
+  slot.lastStarted = started;
+  slot.notes = [];
   slot.building = folderInventoryUncached(drive)
     .then((inv) => {
+      // Folders the app created or renamed while the listing was running.
+      for (const change of slot.notes) applyFolderNote(inv, change);
       slot.inv = inv;
-      console.log(`[drive] folder index ready: ${inv.folders.length} folders`
+      // Verdicts written DURING the rebuild were judged against the old
+      // index; clear them again now the new one is in place.
+      if (fresh) cache.bust('driveMatch:');
+      console.log(`[drive] folder index ${reason === 'refresh' ? 'refreshed' : 'ready'}: `
+        + `${inv.folders.length} folders`
         + ` in ${((Date.now() - started) / 1000).toFixed(1)}s`
         + (inv.complete ? '' : ' (TRUNCATED at the page cap)'));
       return inv;
@@ -618,7 +705,7 @@ function startFolderInventory(drive, { fresh = false } = {}) {
       console.warn('[drive] folder index failed:', e.message);
       throw e;
     })
-    .finally(() => { slot.building = null; });
+    .finally(() => { slot.building = null; slot.notes = []; });
 
   // Nothing awaits this when it is started in the background, and an
   // unhandled rejection would reach the process-level net in server.js.
@@ -1098,6 +1185,7 @@ function patientCodeRegExp(code) {
 /// name far too often for that to be safe.
 async function findPatientFolder(drive, parentId, {
   patientCode, patientName, desiredName, fresh = false, everywhere = false,
+  throwOnError = false,
 }) {
   let folders;
   try {
@@ -1116,7 +1204,12 @@ async function findPatientFolder(drive, parentId, {
       everywhere,
       q: everywhere ? codeParts[0] : '',
     });
-  } catch {
+  } catch (e) {
+    // For a caller that creates a folder when nothing is found, "Drive did
+    // not answer" and "Drive has no such folder" must not look the same:
+    // treating the first as the second is how a timed-out lookup became a
+    // second folder for a patient who already had one.
+    if (throwOnError) throw e;
     return null;
   }
   if (!folders.length) return null;
@@ -1190,8 +1283,13 @@ async function ensurePatientFolder(drive, settings, { patientCode, patientName }
   // produced it. The clinic's Drive may already hold "Asha Rao - P-042"
   // while our template says "P-042 - Asha Rao"; creating the second one
   // would split that patient's history across two folders.
+  //
+  // throwOnError on both lookups: if either cannot be completed, stop here
+  // with no folder rather than create one that may well be a duplicate.
+  // ensurePatientFolderForId turns the throw into "try again later".
   const found = await findPatientFolder(drive, parent, {
     patientCode, patientName, desiredName: desired, fresh: true,
+    throwOnError: true,
   });
   if (found) {
     return {
@@ -1211,6 +1309,7 @@ async function ensurePatientFolder(drive, settings, { patientCode, patientName }
     desiredName: desired,
     fresh: true,
     everywhere: true,
+    throwOnError: true,
   });
   if (foundAnywhere) {
     const existingPath = await folderPath(drive, foundAnywhere.id);
@@ -1374,9 +1473,12 @@ module.exports = {
   FULL_SCOPE,
   hasFullScope,
   listFolders,
+  refreshFoldersInBackground,
+  folderRefreshRunning,
   accessTokenFor,
   folderInventory,
   folderInventoryReady,
+  folderInventoryBuilding,
   noteFolderChanged,
   startFolderInventory,
   listFiles,

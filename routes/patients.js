@@ -30,11 +30,65 @@ const router = express.Router();
 // Both admin & doctor can manage patients (adjust if you want admin-only create).
 router.use(authRequired());
 
-// GET /api/patients?q=&limit=&offset=
+// GET /api/patients?q=&limit=&offset=&sort=&dir=&visits=&last_from=&last_to=
 // Soft-deleted patients are INCLUDED in the response (with deleted_at set) so
-// the UI can show a deleted indicator. Active rows sort first, then by most
-// recent session date DESC (fallback to updated_at). Paginated with
-// limit/offset so the client can lazy-load on scroll. Defaults: limit=10.
+// the UI can show a deleted indicator. Active rows always sort first.
+// Paginated with limit/offset so the client can lazy-load on scroll.
+// Defaults: limit=10.
+//
+// A visit is a treatment session: there is at most one per patient per day
+// (UNIQUE (patient_id, session_date)), so the session count IS the number of
+// visits and the newest session date is the last visit.
+//
+// sort + dir (both whitelisted - the values pick from these tables, they
+// never reach SQL themselves):
+//   recent      last activity: last visit, else last edit   (default desc)
+//   last_visit  last visit date; never-visited always last  (default desc)
+//   visits      number of visits: desc = most, asc = least  (default desc)
+//   name        patient name A-Z / Z-A                      (default asc)
+// dir: 'asc' | 'desc'; anything else means the field's default.
+// Older app builds send one combined key instead; LEGACY_SORTS maps those.
+// visits: '2' = exactly two visits, '5+' = five or more, '0' = never visited.
+// last_from / last_to: 'YYYY-MM-DD', inclusive - keeps patients whose LAST
+// visit falls in that range (either end may be left open). Patients who
+// have never visited have no last visit, so a date filter leaves them out.
+const PATIENT_SORTS = {
+  recent: { dflt: 'DESC', sql: (d) =>
+    `COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) ${d}` },
+  last_visit: { dflt: 'DESC', sql: (d) =>
+    `MAX(s.session_date) ${d} NULLS LAST, p.full_name ASC` },
+  visits: { dflt: 'DESC', sql: (d) =>
+    `COUNT(s.id) ${d}, MAX(s.session_date) DESC NULLS LAST, p.full_name ASC` },
+  name: { dflt: 'ASC', sql: (d) =>
+    `LOWER(p.full_name) ${d}, p.patient_code ASC` },
+};
+const LEGACY_SORTS = {
+  oldest_visit: ['last_visit', 'ASC'],
+  most_visits: ['visits', 'DESC'],
+  least_visits: ['visits', 'ASC'],
+};
+
+/// ORDER BY for the requested sort and direction; unknown values fall back
+/// to the default order rather than failing.
+function patientOrderBy(sortParam, dirParam) {
+  let key = String(sortParam || '');
+  let dir = { asc: 'ASC', desc: 'DESC' }[String(dirParam || '').toLowerCase()];
+  if (LEGACY_SORTS[key]) {
+    dir = dir || LEGACY_SORTS[key][1];
+    key = LEGACY_SORTS[key][0];
+  }
+  const sort = PATIENT_SORTS[key] || PATIENT_SORTS.recent;
+  return sort.sql(dir || sort.dflt);
+}
+
+/// '2' -> { n: 2, orMore: false }, '5+' -> { n: 5, orMore: true }; anything
+/// else -> null (no filter), so a bad value widens the list rather than
+/// emptying it.
+function parseVisitsFilter(v) {
+  const m = /^(\d{1,4})(\+?)$/.exec(String(v || '').trim());
+  return m ? { n: +m[1], orMore: m[2] === '+' } : null;
+}
+
 router.get('/', async (req, res) => {
   const q = (req.query.q || '').trim();
   // Clamp so a buggy client can't blow up the DB with a giant limit.
@@ -42,42 +96,59 @@ router.get('/', async (req, res) => {
   const rawOffset = parseInt(req.query.offset, 10);
   const limit  = Number.isFinite(rawLimit)  ? Math.max(1, Math.min(100, rawLimit))   : 10;
   const offset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset)                 : 0;
+  const order = patientOrderBy(req.query.sort, req.query.dir);
+  const visits = parseVisitsFilter(req.query.visits);
+  // Dates are checked to the exact YYYY-MM-DD shape; anything else is
+  // ignored rather than passed on for Postgres to reject.
+  const isDay = (v) => {
+    const t = String(v || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return false;
+    const d = new Date(`${t}T00:00:00Z`);    // and a real day: not 2026-13-45
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === t;
+  };
+  const lastFrom = isDay(req.query.last_from) ? String(req.query.last_from) : null;
+  const lastTo = isDay(req.query.last_to) ? String(req.query.last_to) : null;
+
+  const params = [];
+  let where = '';
+  if (q) {
+    params.push(`%${q}%`);
+    where = `WHERE p.patient_code ILIKE $${params.length} OR p.full_name ILIKE $${params.length}`;
+  }
+  const havingParts = [];
+  if (visits) {
+    params.push(visits.n);
+    havingParts.push(`COUNT(s.id) ${visits.orMore ? '>=' : '='} $${params.length}`);
+  }
+  if (lastFrom) {
+    params.push(lastFrom);
+    havingParts.push(`MAX(s.session_date) >= $${params.length}::date`);
+  }
+  if (lastTo) {
+    params.push(lastTo);
+    havingParts.push(`MAX(s.session_date) <= $${params.length}::date`);
+  }
+  const having = havingParts.length ? `HAVING ${havingParts.join(' AND ')}` : '';
+  params.push(limit, offset);
 
   try {
-    // last_session = most recent treatment_sessions.session_date for the
-    // patient; falls back to the patient's own updated_at when no session
-    // exists. Used by the patient list UI's "Last updated" column.
-    let rows;
-    if (q) {
-      ({ rows } = await query(
-        `SELECT p.id, p.patient_code, p.full_name, p.phone,
-                p.created_at, p.updated_at, p.deleted_at,
-                MAX(s.session_date) AS last_session,
-                COUNT(s.id)::int    AS session_count
-         FROM patients p
-         LEFT JOIN treatment_sessions s ON s.patient_id = p.id
-         WHERE p.patient_code ILIKE $1 OR p.full_name ILIKE $1
-         GROUP BY p.id
-         ORDER BY (p.deleted_at IS NULL) DESC,
-                  COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
-         LIMIT $2 OFFSET $3`,
-        [`%${q}%`, limit, offset]
-      ));
-    } else {
-      ({ rows } = await query(
-        `SELECT p.id, p.patient_code, p.full_name, p.phone,
-                p.created_at, p.updated_at, p.deleted_at,
-                MAX(s.session_date) AS last_session,
-                COUNT(s.id)::int    AS session_count
-         FROM patients p
-         LEFT JOIN treatment_sessions s ON s.patient_id = p.id
-         GROUP BY p.id
-         ORDER BY (p.deleted_at IS NULL) DESC,
-                  COALESCE(MAX(s.session_date)::timestamptz, p.updated_at) DESC
-         LIMIT $1 OFFSET $2`,
-        [limit, offset]
-      ));
-    }
+    // last_session = most recent treatment_sessions.session_date (the last
+    // visit), session_count = number of sessions (visits). Both shown beside
+    // the name in the patient search.
+    const { rows } = await query(
+      `SELECT p.id, p.patient_code, p.full_name, p.phone,
+              p.created_at, p.updated_at, p.deleted_at,
+              MAX(s.session_date) AS last_session,
+              COUNT(s.id)::int    AS session_count
+       FROM patients p
+       LEFT JOIN treatment_sessions s ON s.patient_id = p.id
+       ${where}
+       GROUP BY p.id
+       ${having}
+       ORDER BY (p.deleted_at IS NULL) DESC, ${order}, p.id DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
     res.json(rows);
   } catch (e) {
     console.error('[patients/list]', e);
@@ -100,7 +171,40 @@ router.get('/', async (req, res) => {
 // Status is computed, not stored, so the filter and the counts are applied
 // AFTER the comparison and the page is sliced last. Paging in SQL first
 // would hand back partial pages and counts that disagree with the rows.
+// How long the drive-folders worklist may spend on Drive before it answers
+// with what it has.
+//
+// Every step below can wait on Google: the base-folder listing (thousands of
+// folders on a clinic Drive), the folder path, and on the Missing filter a
+// walk of up to limit*4 per-patient searches. Any one of them could carry the
+// request past REQUEST_TIMEOUT_MS (60s), which answers 504 and throws the
+// work away. So the route keeps a budget comfortably inside that, each slow
+// step checks it, and whatever did not fit is finished in the background and
+// reported as `drive_indexing` — which the screen now polls on by itself.
+const DRIVE_FOLDERS_BUDGET_MS = 40 * 1000;
+
+/// Resolve with { done, value } — or { done: false } once `ms` has passed.
+/// The underlying work is NOT cancelled; the folder cache keeps it running,
+/// so the next request finds the answer waiting.
+function withDeadline(promise, ms) {
+  promise.catch(() => {});   // a late rejection must not go unhandled
+  if (ms <= 0) return Promise.resolve({ done: false });
+  return Promise.race([
+    promise.then((value) => ({ done: true, value })),
+    new Promise((resolve) => {
+      const t = setTimeout(() => resolve({ done: false }), ms);
+      if (t.unref) t.unref();
+    }),
+  ]);
+}
+
 router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders' }), async (req, res) => {
+  const budgetEnds = Date.now() + DRIVE_FOLDERS_BUDGET_MS;
+  const timeLeft = () => Math.max(0, budgetEnds - Date.now());
+  // Anything that did not finish inside the budget. Reported as indexing so
+  // the screen comes back for the rest instead of showing a partial page as
+  // if it were the whole truth.
+  let driveIncomplete = false;
   const limit = Math.min(200, Math.max(1, +req.query.limit || 25));
   const offset = Math.max(0, +req.query.offset || 0);
   const q = String(req.query.q || '').trim();
@@ -137,14 +241,34 @@ router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders'
       drive = await D.getDriveForAdmin(req.user.id);
       baseId = await D.baseFolderId(drive, settings);
       // The base folder's children, which decide in_place vs elsewhere.
-      folders = await D.listFolders(drive, { parentId: baseId || 'root', fresh });
+      //
+      // Reload (fresh) used to bust this listing and re-read it in-line — the
+      // single slowest thing on the screen, and the usual cause of 'the server
+      // took too long'. Now it re-reads in the BACKGROUND while this request
+      // uses the listing already held; the screen polls and picks up the new
+      // one when it lands.
+      const listOpts = { parentId: baseId || 'root' };
+      if (fresh) D.refreshFoldersInBackground(drive, listOpts);
+      const got = await withDeadline(D.listFolders(drive, listOpts), timeLeft());
+      if (got.done) {
+        folders = got.value;
+      } else {
+        driveIncomplete = true;
+        console.log('[patients/drive-folders] base listing still loading - answering without it');
+      }
+      if (D.folderRefreshRunning(drive, listOpts)) driveIncomplete = true;
       // Logged because a truncated listing is invisible from the outside: it
       // does not error, it just quietly reports folders that ARE in the base
       // as living somewhere else.
       console.log(`[patients/drive-folders] base children: ${folders.length}`);
       // Which folder "in place" actually means. Without it on screen, a row
       // sitting in some other tree looks mislabelled rather than misplaced.
-      if (baseId) basePath = await D.folderPath(drive, baseId);
+      // A nicety, so it gets a short slice of the budget and no more.
+      if (baseId) {
+        const p = await withDeadline(D.folderPath(drive, baseId),
+          Math.min(timeLeft(), 8000));
+        if (p.done) basePath = p.value;
+      }
     } catch (e) {
       driveError = e.message;
     }
@@ -161,6 +285,11 @@ router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders'
       inv = fresh ? null : D.folderInventoryReady(drive);
       if (!inv) {
         D.startFolderInventory(drive, { fresh });
+        indexing = true;
+      } else if (D.folderInventoryBuilding(drive)) {
+        // Answering from the current index while a newer one is read behind
+        // it (Reload, or the index's own periodic refresh). Say so, so the
+        // screen asks again and shows the new picture when it lands.
         indexing = true;
       }
     }
@@ -322,11 +451,18 @@ router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders'
       const kept = [];
 
       while (kept.length < limit && cursor < filtered.length && checked < MAX_CHECKS) {
+        // Out of time: stop here. `cursor` is already the exact resume point,
+        // so the next page carries on from this row rather than skipping or
+        // repeating any.
+        if (timeLeft() < 6000) {
+          driveIncomplete = true;
+          break;
+        }
         const batch = filtered.slice(cursor, cursor + 5);
         cursor += batch.length;
         checked += batch.length;
 
-        await Promise.all(batch.map(async (r) => {
+        const settled = await withDeadline(Promise.all(batch.map(async (r) => {
           try {
             // A cached 'none' verdict means this code was already searched
             // across the whole Drive and found nothing - do not pay Google
@@ -367,7 +503,16 @@ router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders'
             // Missing until the next look - and no verdict is recorded, so
             // it will genuinely be retried.
           }
-        }));
+        })), timeLeft() - 4000);
+        if (!settled.done) {
+          // Drive stalled mid-batch. Hand these rows back rather than skip
+          // them: the next page resumes AT them, and the searches still
+          // running will have left their answers in the cache by then.
+          cursor -= batch.length;
+          checked -= batch.length;
+          driveIncomplete = true;
+          break;
+        }
 
         for (const r of batch) {
           if (r.status === 'missing') kept.push(r);
@@ -405,7 +550,7 @@ router.get('/drive-folders', authRequired(['admin'], { screen: 'patient_folders'
       // True while the whole-Drive index is still being built. The rows are
       // usable now; the counts are the best this request could check, and
       // will be exact once the index lands.
-      drive_indexing: indexing,
+      drive_indexing: indexing || driveIncomplete,
     });
   } catch (e) {
     console.error('[patients/drive-folders]', e);

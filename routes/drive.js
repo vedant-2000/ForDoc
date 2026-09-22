@@ -312,17 +312,56 @@ router.get('/find-folder', authRequired(['admin'], { screen: 'drive' }), async (
 
     const seenIds = new Set();
     const hits = [];
+    // Folders the live double-check found that the index did not have.
+    const liveOnly = new Set();
     if (inv) {
       // Reproduce Drive's `name contains` rather than scanning loosely:
       // Google matches a term against the START of a name token, so 'Ana'
       // finds 'Ana Sharma' but not 'Kanan'. Scanning for a bare substring
       // instead would quietly widen the dialog to folders the live search
       // never offered.
-      const terms = [code, name].filter(Boolean).map(D.normalizeFolderName);
+      //
+      // Word by word: every word of the term must start some word of the
+      // name. Comparing the whole term against single words never matched
+      // anything with a separator in it - 'P-55' normalises to 'p 55', which
+      // is no word's prefix - so hyphenated codes and two-word names always
+      // came back empty from the index. The strict code/name check below
+      // still decides what is actually offered.
+      const terms = [code, name].filter(Boolean)
+        .map((t) => D.normalizeFolderName(t).split(/[^a-z0-9]+/).filter(Boolean))
+        .filter((words) => words.length);
       for (const f of inv.folders) {
         const tokens = D.normalizeFolderName(f.name).split(/[^a-z0-9]+/);
-        if (!terms.some((t) => tokens.some((tok) => tok.startsWith(t)))) continue;
+        const has = (words) => words.every((w) => tokens.some((tok) => tok.startsWith(w)));
+        if (!terms.some(has)) continue;
         if (seenIds.add(f.id)) hits.push(f);
+      }
+
+      // The index found nothing carrying this code. That is the answer that
+      // gets a SECOND folder made for a patient, and it is the one answer an
+      // index can get wrong: it only knows the folders that existed when it
+      // was read, so one made by hand in Drive since is invisible to it. A
+      // hit is cheap to trust; a miss is worth one live search to confirm.
+      // Bounded, so a slow Google costs this dialog seconds, not a timeout.
+      const codeRe = code ? D.patientCodeRegExp(code) : null;
+      const indexHasCode = codeRe
+        && hits.some((f) => codeRe.test(D.normalizeFolderName(f.name)));
+      if (code && !indexHasCode) {
+        const live = await Promise.race([
+          D.listFolders(drive, { q: code, fresh: true }).catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), 8000).unref()),
+        ]);
+        for (const f of live) {
+          if (!seenIds.add(f.id)) continue;
+          hits.push(f);
+          // Teach the index, so the next lookup - and the worklist - find it
+          // without asking Google again.
+          D.noteFolderChanged(drive, { id: f.id, name: f.name, parents: f.parents || [] });
+          liveOnly.add(f.id);
+        }
+        if (liveOnly.size) {
+          console.log(`[drive/find-folder] index missed ${liveOnly.size} folder(s) for ${code}; found live`);
+        }
       }
     } else {
       // Index still building: the original live searches, unchanged. Two of
@@ -364,9 +403,11 @@ router.get('/find-folder', authRequired(['admin'], { screen: 'drive' }), async (
       for (const f of inv.folders) {
         if ((f.parents || []).includes(baseId)) baseChildCount++;
       }
+      const liveParents = new Map(hits.map((f) => [f.id, f.parents || []]));
       inBase = (id) => {
         const f = inv.byId.get(id);
-        return !!(f && (f.parents || []).includes(baseId));
+        const parents = f ? (f.parents || []) : (liveParents.get(id) || []);
+        return parents.includes(baseId);
       };
     } else {
       let baseChildren = [];
@@ -417,7 +458,9 @@ router.get('/find-folder', authRequired(['admin'], { screen: 'drive' }), async (
       out.push({
         id: f.id,
         name: f.name,
-        path: inv ? pathFromIndex(f.id) : await D.folderPath(drive, f.id),
+        path: inv && inv.byId.has(f.id) && !liveOnly.has(f.id)
+          ? pathFromIndex(f.id)
+          : await D.folderPath(drive, f.id),
         in_base: inBase(f.id),
         matched_on: f.matched_on,
         // null when the folder is free to adopt.
@@ -829,109 +872,230 @@ router.post('/settings/preview', authRequired(['admin'], { screen: 'drive' }), a
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Split folders: patients who ended up with TWO folders — the one an admin
+// linked, and a second one the app created from the '{code} - {name}'
+// template before it learned to ask. Treatment records went into whichever
+// one the save path resolved that day, so neither folder is the whole
+// history.
+//
+// Read-only. The scan reports the split and what is sitting in each stray
+// folder; moving anything is a separate, explicit call (merge / trash below).
+//
+// RUN AS A BACKGROUND JOB, NOT INSIDE THE REQUEST
+// The scan lists every folder in the base — thousands, on a clinic Drive,
+// across many sequential Google pages — and then counts the contents of each
+// affected folder. That reliably runs past the 60-second request timeout,
+// which answered 504 while the server finished the work for nobody. It was
+// trimmed once already (the per-folder walk became two batched passes) and
+// still sat on the edge: the Drive only grows, and a slow day on Google or on
+// this host tips it over.
+//
+// So the scan is a job (utils/jobs.js). The screen gets an id at once, polls
+// it for progress, and is shown the previous result immediately while a
+// fresh one runs.
+// ─────────────────────────────────────────────────────────────
+
+const jobs = require('../utils/jobs');
+
+/// Shared by every admin looking at the same base folder, so two people
+/// opening the screen trigger ONE walk of the Drive.
+const dupScanKey = (baseId) => 'dupscan:' + baseId;
+
+/// The whole scan. `progress` feeds the screen's progress line.
+async function scanDuplicateFolders(drive, baseId, progress) {
+  progress({ phase: 'Reading folders from Drive' });
+  // fresh: this screen exists to describe Drive as it is right now, and it
+  // is the screen an admin opens straight after moving things by hand. It is
+  // affordable now that it no longer runs inside a request.
+  const folders = await D.listFolders(drive, { parentId: baseId, fresh: true });
+  const byId = new Map(folders.map((f) => [f.id, f]));
+
+  const { rows: patients } = await query(
+    `SELECT id, patient_code, full_name, drive_folder_id, drive_folder_path
+       FROM patients
+      WHERE deleted_at IS NULL AND drive_folder_id IS NOT NULL
+      ORDER BY patient_code ASC`);
+
+  progress({ phase: 'Matching patients to folders', done: 0, total: patients.length });
+  const rows = [];
+  let checked = 0;
+  for (const p of patients) {
+    checked++;
+    if (checked % 200 === 0) progress({ done: checked });
+
+    // Whole-token match, the same rule the folder matcher uses: without it
+    // code 'P-1' claims 'P-10' and this screen would offer to merge one
+    // patient's records into another patient's folder.
+    const codeRe = D.patientCodeRegExp(p.patient_code);
+    if (!codeRe) continue;
+    const nameNorm = D.normalizeFolderName(p.full_name);
+
+    const strays = [];
+    for (const f of folders) {
+      if (f.id === p.drive_folder_id) continue;
+      const n = D.normalizeFolderName(f.name);
+      if (!codeRe.test(n)) continue;
+      strays.push({
+        id: f.id,
+        name: f.name,
+        matched_name: nameNorm.length > 1 && n.includes(nameNorm),
+      });
+    }
+    if (!strays.length) continue;
+
+    const linked = byId.get(p.drive_folder_id);
+    rows.push({
+      linked_file_count: null,
+      patient_id: p.id,
+      patient_code: p.patient_code,
+      full_name: p.full_name,
+      linked_folder_id: p.drive_folder_id,
+      linked_folder_name: linked ? linked.name : null,
+      linked_folder_path: p.drive_folder_path || null,
+      // A linked folder outside the base is not an error - the clinic may
+      // keep it anywhere - but it is worth showing, because it explains why
+      // the stray looks like the 'real' one in the base folder listing.
+      linked_in_base: !!linked,
+      strays,
+    });
+  }
+  progress({ done: patients.length });
+
+  // Count every affected folder in two batched passes (root contents, then
+  // category-folder contents).
+  const affectedFolderIds = [];
+  for (const row of rows) {
+    affectedFolderIds.push(row.linked_folder_id);
+    affectedFolderIds.push(...row.strays.map((s) => s.id));
+  }
+  progress({ phase: 'Counting files in affected folders', done: 0,
+    total: affectedFolderIds.length });
+  const counts = affectedFolderIds.length
+    ? await D.countPatientFolderContents(drive, affectedFolderIds)
+    : new Map();
+  for (const row of rows) {
+    const linkedCount = counts.get(String(row.linked_folder_id));
+    row.linked_file_count = linkedCount ? linkedCount.file_count : null;
+    for (const stray of row.strays) {
+      const count = counts.get(String(stray.id));
+      stray.file_count = count ? count.file_count : null;
+      stray.subfolder_count = count ? count.subfolder_count : null;
+    }
+  }
+
+  return {
+    base_folder_id: baseId,
+    scanned_at: new Date().toISOString(),
+    folders_scanned: folders.length,
+    summary: {
+      patients_affected: rows.length,
+      stray_folders: rows.reduce((n, r) => n + r.strays.length, 0),
+      files_to_move: rows.reduce((n, r) => n + r.strays.reduce(
+        (m, s) => m + (s.file_count || 0), 0), 0),
+    },
+    rows,
+  };
+}
+
+/// Resolve the Drive and base folder, or answer the request with why not.
+async function dupScanContext(req, res) {
+  const settings = await D.getSettings();
+  const drive = await D.getDriveForAdmin(req.user.id);
+  const baseId = await D.baseFolderId(drive, settings);
+  if (!baseId) {
+    res.status(400).json({
+      error: 'No base folder is configured in Admin -> Google Drive.',
+    });
+    return null;
+  }
+  return { drive, baseId };
+}
+
+function startDupScan(ctx, userId) {
+  return jobs.start('duplicate-folders', dupScanKey(ctx.baseId), userId,
+    (progress) => scanDuplicateFolders(ctx.drive, ctx.baseId, progress));
+}
+
+// POST /api/drive/duplicate-folders/scan   (admin)
+//
+// Start a scan, or join the one already running. Answers at once with the
+// job to poll, plus the last finished result so the screen has something to
+// show while this one works.
+router.post('/duplicate-folders/scan',
+  authRequired(['admin'], { screen: 'split_folders' }), async (req, res) => {
+    try {
+      const ctx = await dupScanContext(req, res);
+      if (!ctx) return;
+      const job = startDupScan(ctx, req.user.id);
+      const last = jobs.latest(dupScanKey(ctx.baseId));
+      res.status(202).json({
+        job: jobs.publicView(job),
+        last_result: last ? last.result : null,
+      });
+    } catch (e) {
+      const err = D.classifyDriveError(e);
+      console.error('[drive/duplicate-folders/scan]', err.message);
+      res.status(err.status || 500).json({ error: err.message, code: err.code });
+    }
+  });
+
+// GET /api/drive/duplicate-folders/scan/:jobId   (admin)
+//
+// Progress, and the result once it is done. Cheap: reads memory only, never
+// Google, so polling it every second or two costs nothing.
+router.get('/duplicate-folders/scan/:jobId([a-f0-9]{18})',
+  authRequired(['admin'], { screen: 'split_folders' }), (req, res) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) {
+      // Expired, or the server restarted and took it with it. Say so plainly
+      // so the screen starts a new scan rather than polling forever.
+      return res.status(404).json({ error: 'This scan is no longer available. Start a new one.' });
+    }
+    res.json({
+      job: jobs.publicView(job),
+      result: job.status === 'done' ? job.result : null,
+    });
+  });
+
 // GET /api/drive/duplicate-folders   (admin)
 //
-// Patients who ended up with TWO folders: the one an admin linked, and a
-// second one the app created from the '{code} - {name}' template before it
-// learned to ask. Treatment records went into whichever one the save path
-// resolved that day, so neither folder is the whole history.
-//
-// Read-only. It reports the split and what is sitting in the stray folder;
-// moving anything is a separate, explicit call.
+// The original one-shot endpoint, kept so an app that has not been updated
+// keeps working. It no longer risks the timeout: it starts (or joins) the
+// background scan and waits a bounded time for it. Finished in time → the
+// fresh result, exactly as before. Not finished → the last result it has,
+// marked as such, while the scan carries on for next time.
 router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folders' }), async (req, res) => {
   try {
-    const settings = await D.getSettings();
-    const drive = await D.getDriveForAdmin(req.user.id);
-    const baseId = await D.baseFolderId(drive, settings);
-    if (!baseId) {
-      return res.status(400).json({
-        error: 'No base folder is configured in Admin -> Google Drive.',
+    const ctx = await dupScanContext(req, res);
+    if (!ctx) return;
+    const job = startDupScan(ctx, req.user.id);
+    // Comfortably inside REQUEST_TIMEOUT_MS (60s), which answers 504 itself.
+    const finished = await jobs.waitFor(job, 45 * 1000);
+    if (res.headersSent || res.writableEnded) return;
+
+    if (finished && finished.status === 'done') return res.json(finished.result);
+    if (finished && finished.status === 'failed') {
+      return res.status(502).json({ error: finished.error });
+    }
+
+    const last = jobs.latest(dupScanKey(ctx.baseId));
+    if (!last) {
+      // Nothing real to show yet. An empty list here would read as "No split
+      // folders" on an older app - a false all-clear - so say it is running.
+      return res.status(503).json({
+        error: 'The scan is still reading Drive. Press Re-scan in a minute '
+          + 'to see the result.',
+        scanning: true,
+        job_id: job.id,
       });
     }
-    // fresh: this screen exists to describe Drive as it is right now, and it
-    // is the screen an admin opens straight after moving things by hand.
-    const folders = await D.listFolders(drive, { parentId: baseId, fresh: true });
-    if (res.headersSent || res.writableEnded) return;
-    const byId = new Map(folders.map((f) => [f.id, f]));
-
-    const { rows: patients } = await query(
-      `SELECT id, patient_code, full_name, drive_folder_id, drive_folder_path
-         FROM patients
-        WHERE deleted_at IS NULL AND drive_folder_id IS NOT NULL
-        ORDER BY patient_code ASC`);
-
-    const rows = [];
-    for (const p of patients) {
-      // Whole-token match, the same rule the folder matcher uses: without it
-      // code 'P-1' claims 'P-10' and this screen would offer to merge one
-      // patient's records into another patient's folder.
-      const codeRe = D.patientCodeRegExp(p.patient_code);
-      if (!codeRe) continue;
-      const nameNorm = D.normalizeFolderName(p.full_name);
-
-      const strays = [];
-      for (const f of folders) {
-        if (f.id === p.drive_folder_id) continue;
-        const n = D.normalizeFolderName(f.name);
-        if (!codeRe.test(n)) continue;
-        strays.push({
-          id: f.id,
-          name: f.name,
-          matched_name: nameNorm.length > 1 && n.includes(nameNorm),
-        });
-      }
-      if (!strays.length) continue;
-
-      const linked = byId.get(p.drive_folder_id);
-      rows.push({
-        linked_file_count: null,
-        patient_id: p.id,
-        patient_code: p.patient_code,
-        full_name: p.full_name,
-        linked_folder_id: p.drive_folder_id,
-        linked_folder_name: linked ? linked.name : null,
-        linked_folder_path: p.drive_folder_path || null,
-        // A linked folder outside the base is not an error - the clinic may
-        // keep it anywhere - but it is worth showing, because it explains why
-        // the stray looks like the 'real' one in the base folder listing.
-        linked_in_base: !!linked,
-        strays,
-      });
-    }
-
-    // Count every affected folder in two batched passes (root contents, then
-    // category-folder contents). The old per-folder walk made this endpoint
-    // issue hundreds of serial Drive requests and routinely exceed 60s.
-    const affectedFolderIds = [];
-    for (const row of rows) {
-      affectedFolderIds.push(row.linked_folder_id);
-      affectedFolderIds.push(...row.strays.map((s) => s.id));
-    }
-    const counts = await D.countPatientFolderContents(drive, affectedFolderIds);
-    if (res.headersSent || res.writableEnded) return;
-    for (const row of rows) {
-      const linkedCount = counts.get(String(row.linked_folder_id));
-      row.linked_file_count = linkedCount ? linkedCount.file_count : null;
-      for (const stray of row.strays) {
-        const count = counts.get(String(stray.id));
-        stray.file_count = count ? count.file_count : null;
-        stray.subfolder_count = count ? count.subfolder_count : null;
-      }
-    }
-
-    // The global request timeout may already have answered 504 while Google
-    // was stalled. Never attempt a second response in that case.
-    if (res.headersSent || res.writableEnded) return;
-
     res.json({
-      base_folder_id: baseId,
-      summary: {
-        patients_affected: rows.length,
-        stray_folders: rows.reduce((n, r) => n + r.strays.length, 0),
-        files_to_move: rows.reduce((n, r) => n + r.strays.reduce(
-          (m, s) => m + (s.file_count || 0), 0), 0),
-      },
-      rows,
+      ...last.result,
+      // The previous result, while the scan that was asked for finishes.
+      scanning: true,
+      stale: true,
+      job_id: job.id,
     });
   } catch (e) {
     const err = D.classifyDriveError(e);

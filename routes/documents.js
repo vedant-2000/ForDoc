@@ -147,12 +147,20 @@ async function pushToDrive(docId, adminId) {
   try {
     const settings = await D.getSettings();
     const drive = await D.getDriveForAdmin(adminId);
-    // Prefer the folder created with the patient; falls back to resolving
-    // the whole chain by name when there isn't one yet.
+    // Prefer the folder created with the patient, else find or create it now.
     let patientFolderId = doc.patient_folder_id;
     if (!patientFolderId) {
       const ensured = await D.ensurePatientFolderForId(doc.patient_id, adminId);
       patientFolderId = ensured && ensured.id;
+    }
+    // Still none means Drive could not be searched just now. Stop: the row is
+    // marked failed and Retry sends it. Carrying on used to fall through to
+    // resolveDocumentFolder's by-name path, which builds a fresh
+    // '{code} - {name}' folder - a split-folder patient in the making,
+    // created exactly when Drive was too slow to find the real one.
+    if (!patientFolderId) {
+      throw new Error("Could not reach the patient's Google Drive folder just now. "
+        + 'The file is kept here - press Retry to send it.');
     }
     const folder = await D.resolveDocumentFolder(drive, settings, {
       patientCode: doc.patient_code,
