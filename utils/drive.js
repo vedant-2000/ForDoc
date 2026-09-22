@@ -1025,11 +1025,25 @@ function patientCodeRegExp(code) {
 /// Name-only matches are deliberately NOT accepted: two patients share a
 /// name far too often for that to be safe.
 async function findPatientFolder(drive, parentId, {
-  patientCode, patientName, desiredName,
+  patientCode, patientName, desiredName, fresh = false, everywhere = false,
 }) {
   let folders;
   try {
-    folders = await listFolders(drive, { parentId: parentId || 'root' });
+    // A whole-Drive fallback is intentionally live and narrowed by the
+    // longest alphanumeric part of the patient code. This catches an existing
+    // patient folder outside the configured base without enumerating every
+    // folder on every patient creation.
+    const codeParts = normalizeFolderName(patientCode)
+      .split(/[^a-z0-9]+/)
+      .filter((v) => v.length >= 2)
+      .sort((a, b) => b.length - a.length);
+    if (everywhere && !codeParts.length) return null;
+    folders = await listFolders(drive, {
+      parentId: parentId || 'root',
+      fresh,
+      everywhere,
+      q: everywhere ? codeParts[0] : '',
+    });
   } catch {
     return null;
   }
@@ -1105,13 +1119,33 @@ async function ensurePatientFolder(drive, settings, { patientCode, patientName }
   // while our template says "P-042 - Asha Rao"; creating the second one
   // would split that patient's history across two folders.
   const found = await findPatientFolder(drive, parent, {
-    patientCode, patientName, desiredName: desired,
+    patientCode, patientName, desiredName: desired, fresh: true,
   });
   if (found) {
     return {
       id: found.id,
       path: [...walked, found.name].join('/'),
       matched: found.how,
+    };
+  }
+
+  // Nothing under the configured base. Before creating a duplicate, look for
+  // this patient code across the connected Drive. This covers clinics that
+  // already had patient folders elsewhere, as well as folders created by hand
+  // after the server's cache was populated.
+  const foundAnywhere = await findPatientFolder(drive, parent, {
+    patientCode,
+    patientName,
+    desiredName: desired,
+    fresh: true,
+    everywhere: true,
+  });
+  if (foundAnywhere) {
+    const existingPath = await folderPath(drive, foundAnywhere.id);
+    return {
+      id: foundAnywhere.id,
+      path: existingPath || foundAnywhere.name,
+      matched: `drive-${foundAnywhere.how}`,
     };
   }
 

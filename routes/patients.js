@@ -605,9 +605,9 @@ router.post('/:id(\\d+)/drive-folder', async (req, res) => {
     });
   }
   // `matched` tells the caller whether we adopted a folder the clinic
-  // already had ('exact' | 'code+name' | 'code') or made a new one
-  // ('created'), so the UI can say which rather than leaving the admin to
-  // wonder why no new folder appeared.
+  // already had ('exact' | 'code+name' | 'code'), found one elsewhere in
+  // Drive ('drive-exact' | 'drive-code+name' | 'drive-code'), or made a new
+  // one ('created'), so the UI can explain why no new folder appeared.
   res.json({ ok: true, folder });
 });
 
