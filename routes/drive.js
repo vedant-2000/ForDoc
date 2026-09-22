@@ -851,6 +851,7 @@ router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folder
     // fresh: this screen exists to describe Drive as it is right now, and it
     // is the screen an admin opens straight after moving things by hand.
     const folders = await D.listFolders(drive, { parentId: baseId, fresh: true });
+    if (res.headersSent || res.writableEnded) return;
     const byId = new Map(folders.map((f) => [f.id, f]));
 
     const { rows: patients } = await query(
@@ -881,40 +882,9 @@ router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folder
       }
       if (!strays.length) continue;
 
-      // Count what is actually in each stray, so nobody has to open Drive to
-      // find out whether a row is worth acting on. An empty stray is just
-      // litter; one with files is a split history.
-      for (const s of strays) {
-        try {
-          // The same walk the patient media view uses - the folder plus one
-          // level of category subfolders, which is exactly how the app files
-          // things, so the count matches what a merge would actually move.
-          const [files, subs] = await Promise.all([
-            D.walkPatientFiles(drive, { rootFolderId: s.id, fresh: true }),
-            D.listFolders(drive, { parentId: s.id, fresh: true }),
-          ]);
-          s.file_count = files.length;
-          s.subfolder_count = subs.length;
-        } catch (e) {
-          s.file_count = null;
-          s.error = e.message;
-        }
-      }
-
       const linked = byId.get(p.drive_folder_id);
-      let linkedFileCount = null;
-      try {
-        const lf = await D.walkPatientFiles(drive, {
-          rootFolderId: p.drive_folder_id, fresh: true,
-        });
-        linkedFileCount = lf.length;
-      } catch (e) {
-        // A linked folder we cannot read is worth showing as unknown rather
-        // than as zero - zero would argue for merging INTO it.
-        linkedFileCount = null;
-      }
       rows.push({
-        linked_file_count: linkedFileCount,
+        linked_file_count: null,
         patient_id: p.id,
         patient_code: p.patient_code,
         full_name: p.full_name,
@@ -929,6 +899,30 @@ router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folder
       });
     }
 
+    // Count every affected folder in two batched passes (root contents, then
+    // category-folder contents). The old per-folder walk made this endpoint
+    // issue hundreds of serial Drive requests and routinely exceed 60s.
+    const affectedFolderIds = [];
+    for (const row of rows) {
+      affectedFolderIds.push(row.linked_folder_id);
+      affectedFolderIds.push(...row.strays.map((s) => s.id));
+    }
+    const counts = await D.countPatientFolderContents(drive, affectedFolderIds);
+    if (res.headersSent || res.writableEnded) return;
+    for (const row of rows) {
+      const linkedCount = counts.get(String(row.linked_folder_id));
+      row.linked_file_count = linkedCount ? linkedCount.file_count : null;
+      for (const stray of row.strays) {
+        const count = counts.get(String(stray.id));
+        stray.file_count = count ? count.file_count : null;
+        stray.subfolder_count = count ? count.subfolder_count : null;
+      }
+    }
+
+    // The global request timeout may already have answered 504 while Google
+    // was stalled. Never attempt a second response in that case.
+    if (res.headersSent || res.writableEnded) return;
+
     res.json({
       base_folder_id: baseId,
       summary: {
@@ -942,6 +936,7 @@ router.get('/duplicate-folders', authRequired(['admin'], { screen: 'split_folder
   } catch (e) {
     const err = D.classifyDriveError(e);
     console.error('[drive/duplicate-folders]', err.message);
+    if (res.headersSent || res.writableEnded) return;
     res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 });

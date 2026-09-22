@@ -675,6 +675,78 @@ async function listFiles(drive, { parentId, fresh = false } = {}) {
   return cache.get(key, FOLDER_TTL_MS, () => listFilesUncached(drive, { parentId }));
 }
 
+/**
+ * Count the files in many patient folders with batched Drive queries.
+ *
+ * A patient folder contains files directly plus files in one level of
+ * category folders. Calling walkPatientFiles once per folder turns the
+ * duplicate-folder report into hundreds of serial Google requests. This
+ * produces the same counts in a handful of requests instead.
+ */
+async function countPatientFolderContents(drive, rootFolderIds) {
+  const roots = [...new Set((rootFolderIds || []).filter(Boolean).map(String))];
+  const counts = new Map(roots.map((id) => [id, {
+    file_count: 0,
+    subfolder_count: 0,
+  }]));
+  if (!roots.length) return counts;
+
+  const FOLDER_MIME = 'application/vnd.google-apps.folder';
+  const chunked = (values, size = 25) => {
+    const out = [];
+    for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+    return out;
+  };
+  const listChildren = async (parentIds) => {
+    const children = [];
+    for (const ids of chunked(parentIds)) {
+      const parentQ = ids.map((id) => (
+        `'${id.replace(/['\\]/g, '')}' in parents`
+      )).join(' or ');
+      let pageToken;
+      do {
+        const { data } = await drive.files.list({
+          q: `trashed=false and (${parentQ})`,
+          fields: 'nextPageToken, files(id,mimeType,parents,shortcutDetails)',
+          pageSize: 1000,
+          pageToken,
+          spaces: 'drive',
+          includeItemsFromAllDrives: true,
+          supportsAllDrives: true,
+          corpora: 'allDrives',
+        });
+        children.push(...(data.files || []));
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+    }
+    return children;
+  };
+
+  const rootSet = new Set(roots);
+  const subfolderOwner = new Map();
+  for (const child of await listChildren(roots)) {
+    const owner = (child.parents || []).find((id) => rootSet.has(id));
+    if (!owner || child.shortcutDetails) continue;
+    if (child.mimeType === FOLDER_MIME) {
+      counts.get(owner).subfolder_count++;
+      subfolderOwner.set(child.id, owner);
+    } else {
+      counts.get(owner).file_count++;
+    }
+  }
+
+  const subfolderIds = [...subfolderOwner.keys()];
+  if (subfolderIds.length) {
+    for (const child of await listChildren(subfolderIds)) {
+      if (child.mimeType === FOLDER_MIME || child.shortcutDetails) continue;
+      const subId = (child.parents || []).find((id) => subfolderOwner.has(id));
+      const owner = subId && subfolderOwner.get(subId);
+      if (owner) counts.get(owner).file_count++;
+    }
+  }
+  return counts;
+}
+
 /** Drop cached listings for one parent (all `q` variants), or all of them. */
 function bustFolders(drive, parentId) {
   const owner = driveOwner(drive);
@@ -1308,6 +1380,7 @@ module.exports = {
   noteFolderChanged,
   startFolderInventory,
   listFiles,
+  countPatientFolderContents,
   walkPatientFiles,
   categoryFromFolderName,
   folderPath,
