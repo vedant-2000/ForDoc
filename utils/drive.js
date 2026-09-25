@@ -2,6 +2,7 @@ const { google } = require('googleapis');
 const { query } = require('../db/pool');
 const cache = require('./cache');
 const { Readable } = require('stream');
+const docCategories = require('./docCategories');
 
 // Full Drive scope, NOT drive.file.
 //
@@ -939,29 +940,17 @@ async function ensureFolderPath(drive, segments, rootId) {
 }
 
 // Human-friendly label for a document category, used as the subfolder name.
-const CATEGORY_FOLDERS = {
-  xray: 'X-Ray',
-  scan: 'Scans',
-  report: 'Reports',
-  prescription: 'Prescriptions',
-  photo: 'Photos',
-  body: 'Body Photos',
-  treatment: 'Treatment Records',
-  other: 'Other',
-};
+// The category -> Drive subfolder mapping now lives in the database, with
+// the old hard-coded values as the fallback; see utils/docCategories.js.
+// Kept synchronous: this is called while building a Drive path.
 
 /**
- * The reverse of CATEGORY_FOLDERS: a Drive subfolder name back to a category
- * key, for guessing the category of a file nobody filed through the app.
- * '' (the patient's own root folder, not a subfolder) reads as 'other'.
+ * The reverse: a Drive subfolder name back to a category key, for guessing
+ * the category of a file nobody filed through the app. '' (the patient's own
+ * root folder, not a subfolder) reads as 'other'.
  */
 function categoryFromFolderName(folderName) {
-  const n = String(folderName || '').trim().toLowerCase();
-  if (!n) return 'other';
-  for (const [key, label] of Object.entries(CATEGORY_FOLDERS)) {
-    if (label.toLowerCase() === n) return key;
-  }
-  return 'other';
+  return docCategories.keyFromFolderName(folderName);
 }
 
 /**
@@ -992,7 +981,7 @@ async function walkPatientFiles(drive, { rootFolderId, fresh = false } = {}) {
 }
 
 function categoryFolderName(category) {
-  return CATEGORY_FOLDERS[String(category || 'other').toLowerCase()] || 'Other';
+  return docCategories.folderName(category);
 }
 
 /// Re-parent a folder. Drive has no "move" call: you add the new parent and
@@ -1494,7 +1483,7 @@ module.exports = {
   uploadFile,
   // Path handling
   DEFAULT_SETTINGS,
-  CATEGORY_FOLDERS,
+  documentCategories: () => docCategories.all(),
   getSettings,
   saveSettings,
   renderTemplate,

@@ -28,16 +28,16 @@ const crypto  = require('crypto');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
 const D = require('../utils/drive');
+const docCategories = require('../utils/docCategories');
 
 const router = express.Router();
 
 const DOCS_DIR = path.join(__dirname, '..', 'uploads', 'patient-docs');
 if (!fs.existsSync(DOCS_DIR)) fs.mkdirSync(DOCS_DIR, { recursive: true });
 
-const CATEGORIES = [
-  'xray', 'scan', 'report', 'prescription', 'photo', 'body', 'treatment',
-  'other',
-];
+// The accepted categories, from the database (utils/docCategories.js), with
+// the historical list as the fallback while a server is un-migrated.
+const CATEGORIES = () => docCategories.keys();
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, DOCS_DIR),
@@ -56,7 +56,7 @@ const upload = multer({ storage, limits: { fileSize: 60 * 1024 * 1024 } });
 
 function cat(v) {
   const c = String(v || 'other').toLowerCase().trim();
-  return CATEGORIES.includes(c) ? c : 'other';
+  return CATEGORIES().includes(c) ? c : 'other';
 }
 
 function textOrNull(v, max = 500) {
@@ -631,9 +631,14 @@ router.get('/tags', async (req, res) => {
   }
 });
 
-// GET /api/documents/categories — the vocabulary, so clients don't hardcode it
+// GET /api/documents/categories — the vocabulary, so clients don't hardcode
+// it. `label` is what the apps show; `folder` is where it files in Drive.
 router.get('/categories', (_req, res) => {
-  res.json(CATEGORIES.map((c) => ({ id: c, label: D.categoryFolderName(c) })));
+  res.json(docCategories.all().map((c) => ({
+    id: c.key,
+    label: c.label,
+    folder: c.folder,
+  })));
 });
 
 // ─────────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ const SCREENS = [
   { key: 'drive_reconcile', label: 'Patients vs Drive' },
   { key: 'split_folders',   label: 'Split folders' },
   { key: 'store',           label: 'Store' },
+  { key: 'document_tags',   label: 'Document tags' },
 ];
 
 const SCREEN_KEYS = SCREENS.map((s) => s.key);

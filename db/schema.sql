@@ -587,13 +587,48 @@ ALTER TABLE drive_settings
     ADD COLUMN IF NOT EXISTS auto_create_patient_folder BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- ── Document tags ─────────────────────────────────────────
--- Free-form labels on a document ("pre-op", "left knee", "follow-up"), so a
--- particular image can be found without opening every thumbnail. Deliberately
--- not a fixed vocabulary: what a clinic wants to label by differs, and a
--- closed list would go unused.
+-- Labels on a document ("pre-op", "left knee", "follow-up"), so a particular
+-- image can be found without opening every thumbnail. The COLUMN is free
+-- text on purpose - what a clinic wants to label by differs, and anything
+-- already filed must keep its labels.
 ALTER TABLE patient_documents ADD COLUMN IF NOT EXISTS tags TEXT[];
 CREATE INDEX IF NOT EXISTS idx_patient_documents_tags
     ON patient_documents USING GIN (tags);
+
+-- What a document can be filed as: the key stored on the row, the label the
+-- apps show, and the Drive subfolder it files into. Was hard-coded in three
+-- places (routes/documents.js, utils/drive.js and each app); see
+-- db/migrations/011_document_categories.sql.
+CREATE TABLE IF NOT EXISTS document_categories (
+    id          SERIAL PRIMARY KEY,
+    key         TEXT UNIQUE NOT NULL,
+    label       TEXT NOT NULL,
+    folder_name TEXT NOT NULL,
+    sort_order  INT  NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_document_categories_order
+    ON document_categories(sort_order);
+
+-- Seeded by db/seeds/document_vocabulary.sql, which `npm run db:init` runs
+-- straight after this file (and which can be run on its own with psql).
+
+-- The labels the app OFFERS when something is uploaded. Free text still goes
+-- in, but typing is what produced 'xray', 'X Ray' and 'x-ray' side by side;
+-- an admin-kept list is what stops that. Same shape as the other catalogues
+-- (effectiveness_options, sitting positions): label + order + is_active.
+CREATE TABLE IF NOT EXISTS document_tag_options (
+    id          SERIAL PRIMARY KEY,
+    label       TEXT UNIQUE NOT NULL,
+    sort_order  INT  NOT NULL DEFAULT 0,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_document_tag_options_order
+    ON document_tag_options(sort_order);
+
+-- Seeded by db/seeds/document_vocabulary.sql (see above).
 
 
 

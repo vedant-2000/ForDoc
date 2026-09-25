@@ -15,6 +15,7 @@
 
 const express = require('express');
 const { query, tx } = require('../db/pool');
+const docCategories = require('../utils/docCategories');
 const { authRequired } = require('../middleware/auth');
 
 const router = express.Router();
@@ -251,6 +252,162 @@ router.put('/effectiveness', authRequired(['admin'], { screen: 'effectiveness' }
     res.status(500).json({ error: 'Save failed' });
   }
 });
+
+// ─────────────────────────────────────────────────────────────
+// Document / photo tags
+//
+// The labels the app OFFERS when a photo or document is uploaded. The tags
+// column itself stays free text, so nothing already filed is invalidated and
+// a tag typed by hand still saves - this list is what stops the same thing
+// being filed as 'xray', 'X Ray' and 'x-ray'.
+// ─────────────────────────────────────────────────────────────
+
+/// Trim, drop blanks, de-duplicate case-insensitively, cap the length of
+/// each label and the size of the list. A tag is a label, not a note.
+function cleanTagOptions(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const label = String(raw == null ? '' : raw).trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
+// GET /api/catalog/document-tags → ['X-ray','Pre-op',...]
+// Any signed-in user: this is what the upload screen offers.
+router.get('/document-tags', authRequired(), async (_req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT label FROM document_tag_options
+        WHERE is_active = TRUE
+        ORDER BY sort_order, label`
+    );
+    res.json(rows.map((r) => r.label));
+  } catch (e) {
+    // An older database has no table yet; an empty list means the upload
+    // screen simply offers nothing, which is how it behaved before.
+    if (e && e.code === '42P01') return res.json([]);
+    console.error('[catalog/document-tags GET]', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PUT /api/catalog/document-tags   body: { options: ['X-ray','Pre-op',...] }
+// Admin: replace the whole list, keeping the array's order.
+router.put('/document-tags',
+  authRequired(['admin'], { screen: 'document_tags' }), async (req, res) => {
+    const list = Array.isArray(req.body?.options) ? req.body.options : null;
+    if (!list) return res.status(400).json({ error: 'options must be an array' });
+    const clean = cleanTagOptions(list);
+
+    try {
+      const rows = await tx(async (c) => {
+        // Replaced wholesale, like the other catalogues: the order of the
+        // array IS the order they appear in, and removing one here does not
+        // touch the documents already carrying that tag.
+        await c.query('DELETE FROM document_tag_options');
+        for (let i = 0; i < clean.length; i++) {
+          await c.query(
+            `INSERT INTO document_tag_options (label, sort_order) VALUES ($1, $2)`,
+            [clean[i], i]
+          );
+        }
+        const { rows: r } = await c.query(
+          `SELECT label FROM document_tag_options
+            WHERE is_active = TRUE
+            ORDER BY sort_order`
+        );
+        return r;
+      });
+      res.json({ options: rows.map((r) => r.label) });
+    } catch (e) {
+      console.error('[catalog/document-tags PUT]', e);
+      res.status(500).json({ error: 'Save failed' });
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────
+// Document categories
+//
+// What a document can be filed as. Each carries the label the apps show and
+// the Drive subfolder it files into, which is why this is not just a list of
+// strings: renaming a folder here changes where NEW documents go, and the
+// ones already in Drive stay where they are.
+// ─────────────────────────────────────────────────────────────
+
+/// A key is what gets stored on every document, so it is reduced to
+/// something stable: lower case, letters, digits and underscores.
+const categoryKey = (v) => String(v == null ? '' : v)
+  .trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  .replace(/^_+|_+$/g, '').slice(0, 32);
+
+/// Drive rejects a folder name containing a slash, and a blank one would
+/// file into the patient's root folder by accident.
+const folderName = (v) => String(v == null ? '' : v)
+  .replace(/[\\/]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60);
+
+// GET /api/catalog/document-categories → [{ key, label, folder }]
+router.get('/document-categories', authRequired(), async (_req, res) => {
+  try {
+    await docCategories.refresh();
+    res.json(docCategories.all());
+  } catch (e) {
+    console.error('[catalog/document-categories GET]', e);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// PUT /api/catalog/document-categories
+//   body: { categories: [{ key, label, folder }, ...] }
+// Admin: replace the whole list, keeping the array's order.
+router.put('/document-categories',
+  authRequired(['admin'], { screen: 'document_tags' }), async (req, res) => {
+    const list = Array.isArray(req.body?.categories) ? req.body.categories : null;
+    if (!list) return res.status(400).json({ error: 'categories must be an array' });
+
+    const clean = [];
+    const seen = new Set();
+    for (const raw of list) {
+      const key = categoryKey(raw && raw.key);
+      if (!key || seen.has(key)) continue;
+      const label = String((raw && raw.label) || key).trim().slice(0, 40);
+      const folder = folderName((raw && raw.folder) || label) || 'Other';
+      seen.add(key);
+      clean.push({ key, label, folder });
+      if (clean.length >= 60) break;
+    }
+    // 'treatment' and 'other' are where saved treatment records and anything
+    // unrecognised file themselves. Dropping them would not rename filing,
+    // it would break it, so they are put back at the end.
+    for (const k of docCategories.REQUIRED) {
+      if (!seen.has(k)) clean.push(docCategories.DEFAULTS.find((d) => d.key === k));
+    }
+
+    try {
+      await tx(async (c) => {
+        await c.query('DELETE FROM document_categories');
+        for (let i = 0; i < clean.length; i++) {
+          await c.query(
+            `INSERT INTO document_categories (key, label, folder_name, sort_order)
+             VALUES ($1, $2, $3, $4)`,
+            [clean[i].key, clean[i].label, clean[i].folder, i]);
+        }
+      });
+      // So this process serves the new list at once rather than at the next
+      // refresh; other processes pick it up on theirs.
+      await docCategories.refresh();
+      res.json({ categories: docCategories.all() });
+    } catch (e) {
+      console.error('[catalog/document-categories PUT]', e);
+      res.status(500).json({ error: 'Save failed' });
+    }
+  });
 
 // ─────────────────────────────────────────────────────────────
 // Rooms (editable list of treatment-room names)

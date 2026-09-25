@@ -350,6 +350,12 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+// The document vocabulary (categories and their Drive folders) is read into
+// memory here, once, so the code that builds a Drive path stays synchronous.
+// It re-reads itself periodically and after an edit; until the first read
+// lands, the built-in defaults are served.
+require('./utils/docCategories').start();
+
 const PORT = +(process.env.PORT || 4000);
 server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend listening on http://localhost:${PORT}`);

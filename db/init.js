@@ -1,4 +1,5 @@
-// One-shot DB initializer: applies schema.sql and seeds default admin.
+// One-shot DB initializer: applies schema.sql, the seed files, and the
+// default admin.
 // Usage:  node db/init.js
 require('dotenv').config();
 const fs   = require('fs');
@@ -10,6 +11,17 @@ async function main() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   console.log('[init] applying schema...');
   await pool.query(sql);
+
+  // Seed files: lists the app offers, kept as SQL so they can also be run
+  // on their own against a live database with psql. Each one seeds only
+  // while its table is empty, so an admin's edits are never undone.
+  const seedsDir = path.join(__dirname, 'seeds');
+  if (fs.existsSync(seedsDir)) {
+    for (const name of fs.readdirSync(seedsDir).filter((f) => f.endsWith('.sql')).sort()) {
+      console.log(`[init] applying seed ${name}...`);
+      await pool.query(fs.readFileSync(path.join(seedsDir, name), 'utf8'));
+    }
+  }
 
   const adminUser = process.env.ADMIN_USERNAME || 'admin';
   const adminPass = process.env.ADMIN_PASSWORD || 'admin123';

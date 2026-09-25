@@ -793,8 +793,10 @@ router.get('/settings', authRequired(), async (_req, res) => {
       root_folder_path: rootFolderPath,
       needs_reconnect: needsReconnect,
       placeholders: ['{code}', '{name}', '{year}', '{month}', '{date}', '{category}'],
-      categories: Object.entries(D.CATEGORY_FOLDERS)
-        .map(([id, label]) => ({ id, label })),
+      // The {category} placeholder's possible values, from the database
+      // list rather than a second hard-coded copy.
+      categories: D.documentCategories()
+        .map((c) => ({ id: c.key, label: c.folder })),
     });
   } catch (e) {
     console.error('[drive/settings/get]', e);
