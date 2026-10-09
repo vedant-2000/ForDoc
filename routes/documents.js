@@ -525,6 +525,7 @@ router.get('/', async (req, res) => {
         // than the walk reaches, answers that it exists and stays.
         try {
           const seen = new Set(walked.map((f) => f.id));
+          const verifiedPresent = new Set();
           const suspects = docs.filter((d) =>
             !d.drive_only
             && d.drive_file_id
@@ -547,30 +548,64 @@ router.get('/', async (req, res) => {
               + ' showing all. Check the folder layout / date_subfolders.');
           } else if (suspects.length) {
             const gone = new Set();
+            // What Drive told us about each one, so the deletion can be
+            // recorded (who / when) rather than only hidden.
+            const goneInfo = new Map();
             for (const d of suspects) {
               try {
                 const { data } = await drive.files.get({
                   fileId: d.drive_file_id,
-                  fields: 'id,trashed',
+                  fields: 'id,trashed,trashedTime,trashingUser(displayName,emailAddress)',
                   supportsAllDrives: true,
                 });
                 // Deleting in the Drive UI moves to the bin rather than
                 // erasing, so `trashed` is the usual signal; a 404 below is
                 // the permanent case.
-                if (data && data.trashed) gone.add(d.drive_file_id);
+                if (data && data.trashed) {
+                  gone.add(d.drive_file_id);
+                  goneInfo.set(d.drive_file_id, { permanent: false, data });
+                } else if (data) {
+                  verifiedPresent.add(d.drive_file_id);
+                }
               } catch (e) {
                 const status = e && e.code;
-                if (status === 404) gone.add(d.drive_file_id);
+                if (status === 404) {
+                  gone.add(d.drive_file_id);
+                  goneInfo.set(d.drive_file_id, { permanent: true, data: null });
+                }
                 // Anything else — a rate limit, a network blip — leaves the
                 // document visible. Erring towards showing a record is the
                 // only acceptable direction here.
               }
             }
             if (gone.size) {
+              // Keep the record of it: the name, the patient, and who deleted
+              // it in Drive and when (Drive reports both). Once per document.
+              // Best effort - never allowed to break the list.
+              for (const d of suspects) {
+                if (!gone.has(d.drive_file_id)) continue;
+                try {
+                  await bin.logDriveDeletion(d, goneInfo.get(d.drive_file_id));
+                } catch (e) {
+                  console.warn('[documents/list] could not record Drive deletion:', e.message);
+                }
+              }
               docs = docs.filter((d) => !gone.has(d.drive_file_id) || d.drive_only);
               console.log(`[documents/list] hid ${gone.size} document(s)`
                 + ` deleted from Drive for patient ${pid}`);
             }
+          }
+          // A document recorded as deleted in Drive that is now seen there
+          // again (restored from Drive's Trash) is no longer deleted. Only
+          // files actually SEEN in the walk, or confirmed present just now,
+          // count - a row merely shown because verification was skipped must
+          // not clear its record.
+          if (suspects.length <= MAX_VERIFY) {
+            const present = docs
+              .filter((d) => d.id > 0 && d.drive_file_id
+                && (seen.has(d.drive_file_id) || verifiedPresent.has(d.drive_file_id)))
+              .map((d) => d.id);
+            await bin.resolveDriveRestored(present);
           }
         } catch (e) {
           console.warn('[documents/list] deleted-file check skipped:', e.message);
@@ -1104,68 +1139,78 @@ router.get('/drive/:fileId([A-Za-z0-9_-]+)/thumb', async (req, res) => {
   }
 });
 
-// DELETE /api/documents/:id — soft delete by default.
+// ── DOCUMENT DELETION DISABLED BY OWNER REQUEST (2026-10-09) ─────────────
 //
-// The Drive copy is deliberately LEFT ALONE unless ?drive=1 is passed: Drive
-// is the clinic's archive of record, and a mis-click in the app should not
-// reach into it. `purge=1` (admin) removes the local file and the row too.
-router.delete('/:id(\\d+)', async (req, res) => {
-  const id = +req.params.id;
-  const purge = String(req.query.purge || '') === '1' && req.user.role === 'admin';
-  const alsoDrive = String(req.query.drive || '') === '1';
+// There is no longer any way to delete a patient document or photo through
+// the API: Drive is the clinic's archive of record, and the apps' delete
+// buttons are gone. A DELETE /api/documents/:id now answers 404.
+//
+// Left commented rather than removed so it can be restored in one step.
+// Everything already deleted stays recoverable: see utils/recycleBin.js and
+// the Recycle bin admin screen.
+//
+// // DELETE /api/documents/:id — soft delete by default.
+// //
+// // The Drive copy is deliberately LEFT ALONE unless ?drive=1 is passed: Drive
+// // is the clinic's archive of record, and a mis-click in the app should not
+// // reach into it. `purge=1` (admin) removes the local file and the row too.
+// router.delete('/:id(\\d+)', async (req, res) => {
+//   const id = +req.params.id;
+//   const purge = String(req.query.purge || '') === '1' && req.user.role === 'admin';
+//   const alsoDrive = String(req.query.drive || '') === '1';
 
-  try {
-    const { rows } = await query(
-      'SELECT * FROM patient_documents WHERE id=$1', [id]);
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const doc = rows[0];
+//   try {
+//     const { rows } = await query(
+//       'SELECT * FROM patient_documents WHERE id=$1', [id]);
+//     if (!rows.length) return res.status(404).json({ error: 'Not found' });
+//     const doc = rows[0];
 
-    // ── DRIVE DELETION DISABLED BY OWNER REQUEST (2026-09-03) ────────────
-    //
-    // This was the ONLY place in the entire system that could delete anything
-    // from Google Drive (audited: no bulk path exists; Move re-parents, it
-    // never removes). Drive is the clinic's archive of record, and with the
-    // folder-migration tooling now linking hundreds of real patient folders,
-    // the owner asked for zero deletion capability toward Drive - a Drive
-    // copy is now removable only by hand, in Drive itself.
-    //
-    // Deleting a document in the app still soft-deletes (or purges) the LOCAL
-    // record exactly as before; only the reach into Drive is severed.
-    //
-    // if (alsoDrive && doc.drive_file_id) {
-    //   try {
-    //     const drive = await D.getDriveForAdmin(
-    //       req.user.role === 'admin' ? req.user.id : null);
-    //     await drive.files.delete({ fileId: doc.drive_file_id });
-    //   } catch (e) {
-    //     console.warn('[documents/delete] drive delete failed:', e.message);
-    //   }
-    // }
-    if (alsoDrive) {
-      console.warn(
-        '[documents/delete] drive=1 requested for doc ' + id
-        + ' but Drive deletion is disabled - Drive copy left untouched');
-    }
+//     // ── DRIVE DELETION DISABLED BY OWNER REQUEST (2026-09-03) ────────────
+//     //
+//     // This was the ONLY place in the entire system that could delete anything
+//     // from Google Drive (audited: no bulk path exists; Move re-parents, it
+//     // never removes). Drive is the clinic's archive of record, and with the
+//     // folder-migration tooling now linking hundreds of real patient folders,
+//     // the owner asked for zero deletion capability toward Drive - a Drive
+//     // copy is now removable only by hand, in Drive itself.
+//     //
+//     // Deleting a document in the app still soft-deletes (or purges) the LOCAL
+//     // record exactly as before; only the reach into Drive is severed.
+//     //
+//     // if (alsoDrive && doc.drive_file_id) {
+//     //   try {
+//     //     const drive = await D.getDriveForAdmin(
+//     //       req.user.role === 'admin' ? req.user.id : null);
+//     //     await drive.files.delete({ fileId: doc.drive_file_id });
+//     //   } catch (e) {
+//     //     console.warn('[documents/delete] drive delete failed:', e.message);
+//     //   }
+//     // }
+//     if (alsoDrive) {
+//       console.warn(
+//         '[documents/delete] drive=1 requested for doc ' + id
+//         + ' but Drive deletion is disabled - Drive copy left untouched');
+//     }
 
-    if (purge) {
-      // Row archived by the recycle-bin trigger; the local file goes to the
-      // trash rather than being erased, so a purge can still be undone.
-      await query('DELETE FROM patient_documents WHERE id=$1', [id]);
-      if (doc.filename) {
-        const moved = bin.trashFile(path.join(DOCS_DIR, doc.filename));
-        if (moved) await bin.annotateLatest('patient_documents', id, { files: [moved] });
-      }
-    } else {
-      await query(
-        'UPDATE patient_documents SET deleted_at = NOW() WHERE id=$1', [id]);
-      if (doc.deleted_at == null) await bin.logSoftDelete('patient_documents', id, doc);
-    }
-    res.json({ ok: true, purged: purge });
-  } catch (e) {
-    console.error('[documents/delete]', e);
-    res.status(500).json({ error: 'Delete failed' });
-  }
-});
+//     if (purge) {
+//       // Row archived by the recycle-bin trigger; the local file goes to the
+//       // trash rather than being erased, so a purge can still be undone.
+//       await query('DELETE FROM patient_documents WHERE id=$1', [id]);
+//       if (doc.filename) {
+//         const moved = bin.trashFile(path.join(DOCS_DIR, doc.filename));
+//         if (moved) await bin.annotateLatest('patient_documents', id, { files: [moved] });
+//       }
+//     } else {
+//       await query(
+//         'UPDATE patient_documents SET deleted_at = NOW() WHERE id=$1', [id]);
+//       if (doc.deleted_at == null) await bin.logSoftDelete('patient_documents', id, doc);
+//     }
+//     res.json({ ok: true, purged: purge });
+//   } catch (e) {
+//     console.error('[documents/delete]', e);
+//     res.status(500).json({ error: 'Delete failed' });
+//   }
+// });
 
 
 // ─────────────────────────────────────────────────────────────

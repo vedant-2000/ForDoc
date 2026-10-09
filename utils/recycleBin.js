@@ -100,6 +100,64 @@ async function pruneResavedMarks(c, sessionId) {
     [sessionId]);
 }
 
+/// A document whose Google Drive file was deleted INSIDE Drive (the app has no
+/// delete button for Drive; Drive is the archive). Recorded once, with what
+/// Drive says about it: who put it in Drive's Trash and when. [info] is
+/// { permanent, data } where data is the files.get answer (or null if the
+/// file is gone for good).
+///
+/// Nothing is restored from here - the file lives in Drive's Trash (kept 30
+/// days) and the owner brings it back there. The entry says so, with the link.
+async function logDriveDeletion(doc, info) {
+  const dup = await query(
+    `SELECT 1 FROM deleted_records
+      WHERE table_name = 'patient_documents' AND row_pk = $1
+        AND restored_at IS NULL AND extra ->> 'what' = 'deleted in Drive'
+      LIMIT 1`,
+    [String(doc.id)]);
+  if (dup.rowCount) return false;
+
+  const permanent = !!(info && info.permanent);
+  const u = info && info.data && info.data.trashingUser;
+  const who = u ? (u.displayName || u.emailAddress) : null;
+  const when = info && info.data && info.data.trashedTime;
+  // Our own links to the file are not worth storing.
+  const { url, thumbnail_url, ...row } = doc;
+  await query(
+    `INSERT INTO deleted_records
+       (table_name, row_pk, kind, data, extra, deleted_by_id, deleted_by_name,
+        deleted_by_role, source, deleted_at)
+     VALUES ('patient_documents', $1, 'soft', $2::jsonb, $3::jsonb, NULL, $4,
+             'google-drive', $5, COALESCE($6::timestamptz, NOW()))`,
+    [String(doc.id), JSON.stringify(row),
+      JSON.stringify({
+        what: 'deleted in Drive',
+        permanent,
+        drive_user: u ? { name: u.displayName || null, email: u.emailAddress || null } : null,
+        drive_trashed_time: when || null,
+        noticed_at: new Date().toISOString(),
+      }),
+      who || 'someone in Google Drive',
+      permanent ? 'deleted permanently in Google Drive'
+        : "moved to Google Drive's Trash",
+      when || null]);
+  return true;
+}
+
+/// Close the records for documents whose Drive file is back (restored from
+/// Drive's Trash). [ids] are patient_documents ids seen present in Drive.
+async function resolveDriveRestored(ids) {
+  if (!ids || !ids.length) return 0;
+  const r = await query(
+    `UPDATE deleted_records
+        SET restored_at = NOW(), restored_by_name = 'Google Drive'
+      WHERE table_name = 'patient_documents' AND kind = 'soft'
+        AND restored_at IS NULL AND extra ->> 'what' = 'deleted in Drive'
+        AND row_pk = ANY($1::text[])`,
+    [ids.map(String)]);
+  return r.rowCount;
+}
+
 /// Move an uploaded file into uploads/.trash instead of deleting it. Returns
 /// { original, trash } (paths relative to uploads/) or null if it was absent.
 function trashFile(absPath) {
@@ -146,29 +204,47 @@ function untrashFiles(files) {
 async function list({ table = null, limit = 50, offset = 0, includeRestored = false } = {}) {
   const where = [];
   const params = [];
-  if (table) { params.push(table); where.push(`table_name = $${params.length}`); }
-  if (!includeRestored) where.push('restored_at IS NULL');
+  if (table) { params.push(table); where.push(`d.table_name = $${params.length}`); }
+  if (!includeRestored) where.push('d.restored_at IS NULL');
   params.push(Math.min(Math.max(+limit || 50, 1), 500));
   params.push(Math.max(+offset || 0, 0));
   const { rows } = await query(
-    `SELECT id, table_name, row_pk, kind, data, extra, deleted_by_id,
-            deleted_by_name, deleted_by_role, source, tx_id::text AS tx_id,
-            deleted_at, restored_at, restored_by_name
-       FROM deleted_records
+    `SELECT d.id, d.table_name, d.row_pk, d.kind, d.data, d.extra, d.deleted_by_id,
+            d.deleted_by_name, d.deleted_by_role, d.source, d.tx_id::text AS tx_id,
+            d.deleted_at, d.restored_at, d.restored_by_name,
+            p.patient_code, p.full_name AS patient_name
+       FROM deleted_records d
+       LEFT JOIN patients p
+         ON p.id = CASE WHEN d.table_name <> 'patients'
+                         AND (d.data ->> 'patient_id') ~ '^[0-9]+$'
+                        THEN (d.data ->> 'patient_id')::int END
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY id DESC
+      ORDER BY d.id DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params);
   return rows;
 }
 
-/// One-line human description of a bin entry.
+/// One-line human description of a bin entry: what it was called, and whose
+/// it was. e.g.  patient_documents#12 "front.jpg" [xray] - patient 20481 Kiran Khanna
+/// The patient comes from the list query's join (or just the id, when the
+/// patient itself has since been removed).
 function describe(r) {
   const d = r.data || {};
-  const name = d.full_name || d.name || d.treatment || d.label || d.position
+  const isDoc = r.table_name === 'patient_documents';
+  // A document is known by the title someone gave it, else the file's own name.
+  const name = (isDoc ? (d.title || d.original_name || d.filename) : null)
+    || d.full_name || d.name || d.treatment || d.label || d.position
     || d.color || d.original_name || d.title || d.patient_code
     || d.session_date || d.filename || '';
-  return `${r.table_name}#${r.row_pk || '-'}${name ? ` "${name}"` : ''}`;
+  let out = `${r.table_name}#${r.row_pk || '-'}${name ? ` "${name}"` : ''}`;
+  if (isDoc && d.category) out += ` [${d.category}]`;
+  if (r.table_name !== 'patients' && d.patient_id != null) {
+    out += r.patient_code
+      ? ` - patient ${r.patient_code} ${r.patient_name || ''}`.trimEnd()
+      : ` - patient #${d.patient_id}`;
+  }
+  return out;
 }
 
 /// Restore a bin entry. A 'hard' entry brings back every row deleted in the
@@ -255,6 +331,16 @@ async function restore(binId, { apply = false, only = false, by = 'system' } = {
 async function restoreSoft(rec, { apply, by }) {
   const d = rec.data || {};
   const plan = [`un-delete ${describe(rec)}`];
+  // A file deleted inside Google Drive is restored in Drive, not here.
+  if (rec.extra && rec.extra.what === 'deleted in Drive') {
+    return {
+      ok: false,
+      plan,
+      error: rec.extra.permanent
+        ? 'This file was deleted permanently in Google Drive - there is nothing in Drive to restore. Only its name and details are kept here.'
+        : "This file is in Google Drive's Trash (kept for 30 days). Open Drive, then Trash, and choose Restore - it will reappear here by itself.",
+    };
+  }
   if (!apply) return { ok: true, plan, notes: [] };
   const id = d.id;
   try {
@@ -310,6 +396,6 @@ function restoreError(e) {
 }
 
 module.exports = {
-  logSoftDelete, annotateLatest, pruneReinserted, pruneResavedMarks,
+  logSoftDelete, annotateLatest, logDriveDeletion, resolveDriveRestored, pruneReinserted, pruneResavedMarks,
   trashFile, list, restore, describe, RESTORE_ORDER,
 };
