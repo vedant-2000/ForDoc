@@ -87,6 +87,7 @@ router.get('/activity', authRequired(['admin'], { screen: 'reports' }), async (r
     LEFT JOIN doctors  doc ON doc.id = s.doctor_id
         WHERE s.session_date BETWEEN $1 AND $2
           AND p.deleted_at IS NULL
+          AND s.deleted_at IS NULL
         ORDER BY s.session_date DESC, p.patient_code ASC`,
       [from, to]);
 

@@ -14,6 +14,7 @@ const fs      = require('fs');
 const multer  = require('multer');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 
 const router = express.Router();
 
@@ -198,8 +199,13 @@ router.patch('/categories/:id', authRequired(['admin'], { screen: 'store' }), as
 router.delete('/categories/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
-    const r = await query('UPDATE store_categories SET is_active=FALSE WHERE id=$1', [id]);
+    const r = await query(
+      `UPDATE store_categories SET is_active=FALSE WHERE id=$1
+       RETURNING *, (SELECT is_active FROM store_categories WHERE id=$1) AS was_active`,
+      [id]);
     if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const { was_active: wasActive, ...row } = r.rows[0];
+    if (wasActive) await bin.logSoftDelete('store_categories', id, { ...row, is_active: true });
     res.json({ ok: true });
   } catch (e) {
     console.error('[store/categories/delete]', e);
@@ -337,7 +343,9 @@ router.delete('/items/:id(\\d+)/photos/:photoId(\\d+)', authRequired(['admin'], 
       [photoId, id],
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    try { fs.unlinkSync(path.join(PHOTOS_DIR, rows[0].filename)); } catch {}
+    // Row archived by the recycle-bin trigger; the photo goes to the trash.
+    const moved = bin.trashFile(path.join(PHOTOS_DIR, rows[0].filename));
+    if (moved) await bin.annotateLatest('store_item_photos', photoId, { files: [moved] });
     res.json({ ok: true });
   } catch (e) {
     console.error('[store/items/photos/delete]', e);
@@ -412,8 +420,13 @@ router.patch('/items/:id', authRequired(['admin'], { screen: 'store' }), async (
 router.delete('/items/:id', authRequired(['admin'], { screen: 'store' }), async (req, res) => {
   const id = +req.params.id;
   try {
-    const r = await query('UPDATE store_items SET is_active=FALSE WHERE id=$1', [id]);
+    const r = await query(
+      `UPDATE store_items SET is_active=FALSE WHERE id=$1
+       RETURNING *, (SELECT is_active FROM store_items WHERE id=$1) AS was_active`,
+      [id]);
     if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const { was_active: wasActive, ...row } = r.rows[0];
+    if (wasActive) await bin.logSoftDelete('store_items', id, { ...row, is_active: true });
     res.json({ ok: true });
   } catch (e) {
     console.error('[store/items/delete]', e);

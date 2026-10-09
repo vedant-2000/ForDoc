@@ -10,8 +10,9 @@
 // here would make the field unusable for half of them.
 
 const express = require('express');
-const { query } = require('../db/pool');
+const { query, tx } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 
 const router = express.Router();
 router.use(authRequired());
@@ -152,8 +153,19 @@ router.patch('/:id(\\d+)', async (req, res) => {
 // outlive the label someone put on them.
 router.delete('/:id(\\d+)', async (req, res) => {
   try {
-    const r = await query('DELETE FROM patient_problems WHERE id=$1', [+req.params.id]);
-    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const id = +req.params.id;
+    const found = await tx(async (c) => {
+      // Documents filed under it lose problem_id (ON DELETE SET NULL) -
+      // remember which, so a restore files them back under it.
+      const docs = await c.query(
+        'SELECT id FROM patient_documents WHERE problem_id=$1', [id]);
+      const r = await c.query('DELETE FROM patient_problems WHERE id=$1', [id]);
+      if (!r.rowCount) return false;
+      await bin.annotateLatest('patient_problems', id,
+        { relink_document_ids: docs.rows.map((d) => d.id) }, c);
+      return true;
+    });
+    if (!found) return res.status(404).json({ error: 'Not found' });
     res.json({ ok: true });
   } catch (e) {
     console.error('[problems/delete]', e);

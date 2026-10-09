@@ -1,7 +1,8 @@
 const express = require('express');
 const bcrypt  = require('bcryptjs');
-const { query } = require('../db/pool');
+const { query, tx } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 const { SCREENS, sanitizeScreens } = require('../middleware/screens');
 
 const router = express.Router();
@@ -96,8 +97,21 @@ router.patch('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = +req.params.id;
   try {
-    const r = await query('DELETE FROM doctors WHERE id=$1', [id]);
-    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const found = await tx(async (c) => {
+      // Their marks and sessions lose doctor_id (ON DELETE SET NULL) -
+      // remember which, so restoring the doctor gives them back.
+      const marks = await c.query('SELECT id FROM marks WHERE doctor_id=$1', [id]);
+      const sessions = await c.query(
+        'SELECT id FROM treatment_sessions WHERE doctor_id=$1', [id]);
+      const r = await c.query('DELETE FROM doctors WHERE id=$1', [id]);
+      if (!r.rowCount) return false;
+      await bin.annotateLatest('doctors', id, {
+        relink_mark_ids: marks.rows.map((m) => m.id),
+        relink_session_ids: sessions.rows.map((s) => s.id),
+      }, c);
+      return true;
+    });
+    if (!found) return res.status(404).json({ error: 'Not found' });
     res.json({ ok: true });
   } catch (e) {
     console.error('[doctors/delete]', e);

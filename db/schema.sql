@@ -174,6 +174,42 @@ ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS created_by_name TEXT;
 -- like pct_bt / pct_at / ss.
 ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS rooms TEXT[];
 
+-- Soft-delete support. A deleted session keeps its row AND all of its marks
+-- (nothing cascades off a row that is only flagged), tagged with WHO removed
+-- it and WHEN — so a mistaken "Delete session" is recoverable from inside the
+-- database and is always attributable, instead of being gone with no trace.
+-- Mirrors the patients soft-delete above.
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS deleted_at      TIMESTAMPTZ;
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS deleted_by_id   INT;
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS deleted_by_name TEXT;
+ALTER TABLE treatment_sessions ADD COLUMN IF NOT EXISTS deleted_by_role TEXT;
+
+-- The original blanket UNIQUE(patient_id, session_date) would block creating a
+-- new session for the same date once an old one is soft-deleted (the deleted
+-- row still occupies the pair). Replace it with a partial unique index over
+-- LIVE rows only — exactly the uq_patients_code_active pattern. The session
+-- create's ON CONFLICT infers this same partial index via its WHERE predicate.
+-- Dropped by its columns rather than a guessed constraint name.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT con.conname
+      FROM pg_constraint con
+     WHERE con.conrelid = 'treatment_sessions'::regclass
+       AND con.contype = 'u'
+       AND (SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+              FROM unnest(con.conkey) AS k(attnum)
+              JOIN pg_attribute att
+                ON att.attrelid = con.conrelid AND att.attnum = k.attnum)
+           = ARRAY['patient_id', 'session_date']
+  LOOP
+    EXECUTE format('ALTER TABLE treatment_sessions DROP CONSTRAINT %I', r.conname);
+  END LOOP;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_patient_date_active
+    ON treatment_sessions (patient_id, session_date) WHERE deleted_at IS NULL;
+
 -- ── Marks (each placed point on the body diagram) ──────────
 CREATE TABLE IF NOT EXISTS marks (
     id              SERIAL PRIMARY KEY,
@@ -646,3 +682,73 @@ CREATE TABLE IF NOT EXISTS report_verifications (
 -- The report looks these up by period, for every patient at once.
 CREATE INDEX IF NOT EXISTS idx_report_verifications_period
     ON report_verifications (period_from, period_to);
+
+-- ── Recycle bin: every delete is recoverable and attributable ──────────
+-- Full rationale in db/migrations/012_recycle_bin.sql (same SQL).
+CREATE TABLE IF NOT EXISTS deleted_records (
+    id               BIGSERIAL PRIMARY KEY,
+    table_name       TEXT        NOT NULL,
+    row_pk           TEXT,                       -- the row's id, as text
+    kind             TEXT        NOT NULL DEFAULT 'hard',
+                                                 -- hard: row removed, data is the only copy
+                                                 -- soft: row still in its table, flagged deleted
+    data             JSONB       NOT NULL,       -- the whole row as it was
+    extra            JSONB,                      -- links to re-make, files moved to trash
+    deleted_by_id    INT,
+    deleted_by_name  TEXT,
+    deleted_by_role  TEXT,
+    source           TEXT,                       -- e.g. "DELETE /api/catalog/rooms/4"
+    tx_id            BIGINT      NOT NULL DEFAULT txid_current(),
+                                                 -- rows removed together share it
+    deleted_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    restored_at      TIMESTAMPTZ,
+    restored_by_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_deleted_records_when
+    ON deleted_records (deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deleted_records_row
+    ON deleted_records (table_name, row_pk);
+CREATE INDEX IF NOT EXISTS idx_deleted_records_tx
+    ON deleted_records (tx_id);
+
+CREATE OR REPLACE FUNCTION archive_deleted_row() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  actor_id TEXT := current_setting('app.actor_id', true);
+BEGIN
+  INSERT INTO deleted_records
+    (table_name, row_pk, kind, data,
+     deleted_by_id, deleted_by_name, deleted_by_role, source)
+  VALUES
+    (TG_TABLE_NAME, to_jsonb(OLD) ->> 'id', 'hard', to_jsonb(OLD),
+     CASE WHEN actor_id ~ '^[0-9]+$' THEN actor_id::int END,
+     COALESCE(NULLIF(current_setting('app.actor_name', true), ''), 'system'),
+     NULLIF(current_setting('app.actor_role', true), ''),
+     NULLIF(current_setting('app.actor_source', true), ''));
+  RETURN OLD;
+END $$;
+
+-- Every table holding clinical records or clinic settings. Deliberately NOT
+-- admins or drive_tokens: copying password hashes' owners and OAuth tokens
+-- into a second table is a leak, not a safety net.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'patients', 'treatment_sessions', 'marks', 'treatment_reports',
+    'patient_problems', 'patient_documents', 'report_verifications',
+    'body_images', 'body_image_alignments', 'body_image_alignments_global',
+    'doctors', 'rooms', 'treatment_catalog', 'treatments_palette',
+    'color_palette', 'sitting_positions', 'effectiveness_options',
+    'document_categories', 'document_tag_options',
+    'store_categories', 'store_items', 'store_item_photos',
+    'store_inward', 'store_outward'
+  ] LOOP
+    IF to_regclass(t) IS NOT NULL THEN
+      EXECUTE format('DROP TRIGGER IF EXISTS trg_archive_deleted ON %I', t);
+      EXECUTE format(
+        'CREATE TRIGGER trg_archive_deleted AFTER DELETE ON %I '
+        'FOR EACH ROW EXECUTE PROCEDURE archive_deleted_row()', t);
+    END IF;
+  END LOOP;
+END $$;

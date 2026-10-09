@@ -17,6 +17,7 @@ const express = require('express');
 const { query, tx } = require('../db/pool');
 const docCategories = require('../utils/docCategories');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 
 const router = express.Router();
 
@@ -88,6 +89,7 @@ router.put('/treatments/:room', authRequired(['admin'], { screen: 'treatments' }
           [room, clean[i], i]
         );
       }
+      await bin.pruneReinserted(c, 'treatment_catalog', ['room', 'treatment']);
       const { rows: r } = await c.query(
         `SELECT id, room, treatment, sort_order
            FROM treatment_catalog
@@ -131,6 +133,7 @@ router.post('/treatments', authRequired(['admin'], { screen: 'treatments' }), as
           );
         }
       }
+      await bin.pruneReinserted(c, 'treatment_catalog', ['room', 'treatment']);
     });
     res.json({ ok: true });
   } catch (e) {
@@ -184,6 +187,7 @@ router.put('/sitting-positions', authRequired(['admin'], { screen: 'sitting' }),
           [clean[i], i]
         );
       }
+      await bin.pruneReinserted(c, 'sitting_positions', ['position']);
       const { rows: r } = await c.query(
         `SELECT position FROM sitting_positions
           WHERE is_active = TRUE
@@ -239,6 +243,7 @@ router.put('/effectiveness', authRequired(['admin'], { screen: 'effectiveness' }
           [clean[i], i]
         );
       }
+      await bin.pruneReinserted(c, 'effectiveness_options', ['label']);
       const { rows: r } = await c.query(
         `SELECT label FROM effectiveness_options
           WHERE is_active = TRUE
@@ -318,6 +323,7 @@ router.put('/document-tags',
             [clean[i], i]
           );
         }
+        await bin.pruneReinserted(c, 'document_tag_options', ['label']);
         const { rows: r } = await c.query(
           `SELECT label FROM document_tag_options
             WHERE is_active = TRUE
@@ -398,6 +404,7 @@ router.put('/document-categories',
              VALUES ($1, $2, $3, $4)`,
             [clean[i].key, clean[i].label, clean[i].folder, i]);
         }
+        await bin.pruneReinserted(c, 'document_categories', ['key']);
       });
       // So this process serves the new list at once rather than at the next
       // refresh; other processes pick it up on theirs.
@@ -647,6 +654,7 @@ router.put('/color-palette', authRequired(['admin'], { screen: 'palette' }), asy
           [cleaned[i], i + 1]
         );
       }
+      await bin.pruneReinserted(c, 'color_palette', ['color']);
     });
     const { rows } = await query(
       `SELECT color FROM color_palette ORDER BY sort_order, id`

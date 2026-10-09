@@ -149,6 +149,7 @@ app.use('/api/store',      require('./routes/store'));
 app.use('/api/problems',   require('./routes/problems'));
 app.use('/api/documents',  require('./routes/documents'));
 app.use('/api/reports',    require('./routes/reports'));
+app.use('/api/recycle-bin', require('./routes/recycle'));
 
 // Health: also reports cache and memory, so "is the cache actually working?"
 // and "how close are we to the 400MB PM2 restart ceiling?" can be answered

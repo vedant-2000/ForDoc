@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, tx } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 
 const router = express.Router();
 router.use(authRequired());
@@ -21,7 +22,7 @@ router.get('/patients/:patientId/sessions', async (req, res) => {
               (SELECT COUNT(*) FROM marks m WHERE m.session_id = s.id)::int AS mark_count
          FROM treatment_sessions s
          LEFT JOIN doctors d ON d.id = s.doctor_id
-        WHERE s.patient_id = $1
+        WHERE s.patient_id = $1 AND s.deleted_at IS NULL
         ORDER BY s.session_date DESC, s.id DESC`,
       [pid]
     );
@@ -44,7 +45,7 @@ router.get('/sessions/:id', async (req, res) => {
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM treatment_sessions s
          LEFT JOIN doctors d ON d.id = s.doctor_id
-        WHERE s.id = $1`,
+        WHERE s.id = $1 AND s.deleted_at IS NULL`,
       [id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
@@ -84,7 +85,7 @@ router.patch('/sessions/:id', async (req, res) => {
   try {
     const { rows } = await query(
       `UPDATE treatment_sessions SET ${sets.join(', ')}
-        WHERE id = $1
+        WHERE id = $1 AND deleted_at IS NULL
         RETURNING id, patient_id, doctor_id, session_date, label, color, notes,
                   pct_bt, pct_at, ss, rooms`,
       vals
@@ -124,7 +125,7 @@ router.post('/patients/:patientId/sessions', async (req, res) => {
       `INSERT INTO treatment_sessions
          (patient_id, doctor_id, session_date, label, color, notes, created_by_name)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT (patient_id, session_date) DO UPDATE
+       ON CONFLICT (patient_id, session_date) WHERE deleted_at IS NULL DO UPDATE
          SET label            = COALESCE(EXCLUDED.label,            treatment_sessions.label),
              color            = COALESCE(EXCLUDED.color,            treatment_sessions.color),
              notes            = COALESCE(EXCLUDED.notes,            treatment_sessions.notes),
@@ -141,13 +142,36 @@ router.post('/patients/:patientId/sessions', async (req, res) => {
 });
 
 // DELETE /api/treatments/sessions/:id
+// Soft delete: the row and its marks are kept, flagged deleted_at with the
+// user who removed it. It vanishes from every list/report (all reads filter
+// deleted_at IS NULL) but can be restored, and the "who deleted this?"
+// question is now answerable from the row itself.
 router.delete('/sessions/:id', async (req, res) => {
   const id = +req.params.id;
   try {
-    const r = await query('DELETE FROM treatment_sessions WHERE id=$1', [id]);
-    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const done = await tx(async (c) => {
+      const r = await c.query(
+        `UPDATE treatment_sessions
+            SET deleted_at = NOW(),
+                deleted_by_id = $2,
+                deleted_by_name = $3,
+                deleted_by_role = $4
+          WHERE id = $1 AND deleted_at IS NULL
+        RETURNING *`,
+        [id, req.user.id || null, req.user.username || null, req.user.role || null]
+      );
+      if (!r.rowCount) return false;
+      await bin.logSoftDelete('treatment_sessions', id, r.rows[0], null, c);
+      return true;
+    });
+    if (!done) return res.status(404).json({ error: 'Not found' });
+    // Also surface the actor in the app log, so a deletion is visible in the
+    // request trail (morgan 'dev' records no user on its own).
+    console.log(`[session/delete] session ${id} soft-deleted by `
+      + `${req.user.username || '?'} (${req.user.role || '?'} #${req.user.id || '?'})`);
     res.json({ ok: true });
   } catch (e) {
+    console.error('[session/delete]', e);
     res.status(500).json({ error: 'Delete failed' });
   }
 });
@@ -209,6 +233,18 @@ router.put('/sessions/:id/marks', async (req, res) => {
 
   try {
     const result = await tx(async (c) => {
+      // A session that has been deleted is only hidden, not gone, so a stale
+      // screen could otherwise keep "saving" marks into it and the clinician
+      // would believe the work was kept. Refuse it, as the old hard delete
+      // did (through the foreign key). FOR SHARE also stops a delete landing
+      // between this check and the insert.
+      const live = await c.query(
+        'SELECT 1 FROM treatment_sessions WHERE id=$1 AND deleted_at IS NULL FOR SHARE', [id]);
+      if (!live.rowCount) {
+        const gone = new Error('session_gone');
+        gone.code = 'session_gone';
+        throw gone;
+      }
       if (isDoctor) {
         await c.query('DELETE FROM marks WHERE session_id=$1 AND doctor_id=$2', [id, me]);
       } else {
@@ -271,6 +307,11 @@ router.put('/sessions/:id/marks', async (req, res) => {
         );
       }
 
+      // The DELETE above put every old mark in the recycle bin; keep only
+      // the ones that did not come back, i.e. marks actually removed (or a
+      // whole set wiped by an empty save).
+      await bin.pruneResavedMarks(c, id);
+
       // Re-number order_num sequentially across the entire session.
       await c.query(
         `WITH ordered AS (
@@ -301,6 +342,9 @@ router.put('/sessions/:id/marks', async (req, res) => {
     });
     res.json(result);
   } catch (e) {
+    if (e && e.code === 'session_gone') {
+      return res.status(404).json({ error: 'This session was deleted - marks were not saved.' });
+    }
     console.error('[marks/put]', e);
     res.status(500).json({ error: 'Save failed' });
   }
@@ -317,7 +361,7 @@ router.get('/patients/:patientId/all', async (req, res) => {
               d.full_name AS doctor_name, d.color AS doctor_color
          FROM treatment_sessions s
          LEFT JOIN doctors d ON d.id = s.doctor_id
-        WHERE s.patient_id = $1
+        WHERE s.patient_id = $1 AND s.deleted_at IS NULL
         ORDER BY s.session_date ASC, s.id ASC`,
       [pid]
     );

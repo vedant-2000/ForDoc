@@ -4,6 +4,7 @@ const fs      = require('fs');
 const multer  = require('multer');
 const { query, tx } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 
 const router = express.Router();
 
@@ -185,7 +186,12 @@ router.put('/:id/mask', authRequired(['admin'], { screen: 'images' }), maskUploa
     await query('UPDATE body_images SET blank_mask_filename=$1 WHERE id=$2',
       [req.file.filename, id]);
     if (old.rows[0].blank_mask_filename) {
-      try { fs.unlinkSync(path.join(MASK_DIR, old.rows[0].blank_mask_filename)); } catch {}
+      // The replaced mask goes to the trash and the bin, so the previous one
+      // can be brought back.
+      const moved = bin.trashFile(path.join(MASK_DIR, old.rows[0].blank_mask_filename));
+      await bin.logSoftDelete('body_images', id,
+        { id, blank_mask_filename: old.rows[0].blank_mask_filename },
+        { what: 'mask replaced', files: moved ? [moved] : [] });
     }
     res.json({ ok: true, mask_url: `/uploads/body-masks/${req.file.filename}` });
   } catch (e) {
@@ -198,12 +204,15 @@ router.put('/:id/mask', authRequired(['admin'], { screen: 'images' }), maskUploa
 router.delete('/:id/mask', authRequired(['admin'], { screen: 'images' }), async (req, res) => {
   const id = +req.params.id;
   try {
-    const { rows } = await query('SELECT blank_mask_filename FROM body_images WHERE id=$1', [id]);
+    const { rows } = await query('SELECT id, blank_mask_filename FROM body_images WHERE id=$1', [id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    if (rows[0].blank_mask_filename) {
-      try { fs.unlinkSync(path.join(MASK_DIR, rows[0].blank_mask_filename)); } catch {}
-    }
     await query('UPDATE body_images SET blank_mask_filename=NULL WHERE id=$1', [id]);
+    if (rows[0].blank_mask_filename) {
+      // Into the trash, not erased, and logged - restorable from the bin.
+      const moved = bin.trashFile(path.join(MASK_DIR, rows[0].blank_mask_filename));
+      await bin.logSoftDelete('body_images', id, rows[0],
+        { what: 'mask cleared', files: moved ? [moved] : [] });
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'Mask clear failed' });
@@ -253,11 +262,23 @@ router.delete('/:id', authRequired(['admin'], { screen: 'images' }), async (req,
       'SELECT filename, is_active, blank_mask_filename FROM body_images WHERE id=$1', [id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     if (rows[0].is_active) return res.status(400).json({ error: 'Cannot delete the active image' });
-    await query('DELETE FROM body_images WHERE id=$1', [id]);
-    try { fs.unlinkSync(path.join(UPLOAD_DIR, rows[0].filename)); } catch {}
-    if (rows[0].blank_mask_filename) {
-      try { fs.unlinkSync(path.join(MASK_DIR, rows[0].blank_mask_filename)); } catch {}
-    }
+    await tx(async (c) => {
+      // Deleting the row blanks body_image_id on every mark drawn on it
+      // (ON DELETE SET NULL). Remember which, so a restore re-links them.
+      const { rows: linked } = await c.query(
+        'SELECT id FROM marks WHERE body_image_id=$1', [id]);
+      await c.query('DELETE FROM body_images WHERE id=$1', [id]);
+      await bin.annotateLatest('body_images', id,
+        { relink_mark_ids: linked.map((m) => m.id) }, c);
+    });
+    // Files go to the trash (after the commit, so a failed delete never
+    // leaves a live row pointing at a moved file).
+    const files = [
+      bin.trashFile(path.join(UPLOAD_DIR, rows[0].filename)),
+      rows[0].blank_mask_filename
+        ? bin.trashFile(path.join(MASK_DIR, rows[0].blank_mask_filename)) : null,
+    ].filter(Boolean);
+    if (files.length) await bin.annotateLatest('body_images', id, { files });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'Delete failed' });

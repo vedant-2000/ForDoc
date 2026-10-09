@@ -1,6 +1,7 @@
 const express = require('express');
-const { query } = require('../db/pool');
+const { query, tx } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 const D = require('../utils/drive');
 const cache = require('../utils/cache');
 
@@ -141,7 +142,7 @@ router.get('/', async (req, res) => {
               MAX(s.session_date) AS last_session,
               COUNT(s.id)::int    AS session_count
        FROM patients p
-       LEFT JOIN treatment_sessions s ON s.patient_id = p.id
+       LEFT JOIN treatment_sessions s ON s.patient_id = p.id AND s.deleted_at IS NULL
        ${where}
        GROUP BY p.id
        ${having}
@@ -890,15 +891,25 @@ router.delete('/:id', async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   const id = +req.params.id;
   try {
-    const r = await query(
-      `UPDATE patients
-          SET deleted_at = COALESCE(deleted_at, NOW()),
-              updated_at = NOW()
-        WHERE id=$1
-      RETURNING id, deleted_at`,
-      [id]
-    );
-    if (!r.rowCount) return res.status(404).json({ error: 'Not found' });
+    const r = await tx(async (c) => {
+      const before = await c.query(
+        'SELECT * FROM patients WHERE id=$1 FOR UPDATE', [id]);
+      if (!before.rowCount) return null;
+      const upd = await c.query(
+        `UPDATE patients
+            SET deleted_at = COALESCE(deleted_at, NOW()),
+                updated_at = NOW()
+          WHERE id=$1
+        RETURNING id, deleted_at`,
+        [id]
+      );
+      // Logged once, on the actual delete - not again on a repeat click.
+      if (before.rows[0].deleted_at == null) {
+        await bin.logSoftDelete('patients', id, before.rows[0], null, c);
+      }
+      return upd;
+    });
+    if (!r) return res.status(404).json({ error: 'Not found' });
     res.json({ ok: true, deleted_at: r.rows[0].deleted_at });
   } catch (e) {
     res.status(500).json({ error: 'Delete failed' });

@@ -81,18 +81,21 @@ function pm2LogFiles(appFilter) {
   return files;
 }
 
-function scanLogs(sessionIds, code, { lines, appFilter }) {
+function scanLogs(sessionIds, patientIds, code, { lines, appFilter }) {
   const files = pm2LogFiles(appFilter);
   if (!files.length) {
     console.log('Could not find any pm2 log files (is pm2 running as this '
       + 'user? try --app <name>, or run as the user that owns the pm2 daemon).');
     return;
   }
-  // A line is relevant if it names one of this patient's sessions, or the
+  // A line is relevant if it names one of this patient's sessions, the
+  // patient's numeric id (session create/list carry that, not the code), the
   // patient code, or a Drive quota error around the same time.
-  const idAlt = sessionIds.length ? `sessions/(?:${sessionIds.join('|')})\\b` : null;
+  const sidAlt = sessionIds.length ? `sessions/(?:${sessionIds.join('|')})\\b` : null;
+  const pidAlt = patientIds.length ? `patients/(?:${patientIds.join('|')})(?:/|\\b)` : null;
   const parts = [
-    idAlt,
+    sidAlt,
+    pidAlt,
     code ? escapeRe(code) : null,
     'storageQuotaExceeded',
   ].filter(Boolean);
@@ -121,10 +124,13 @@ function scanLogs(sessionIds, code, { lines, appFilter }) {
       + 'older than the retained logs - increase --log-lines, or check rotated '
       + 'logs / a database backup.');
   } else {
-    console.log('Look for a `PUT .../sessions/<id>/marks` with a small response '
-      + 'size right before the marks went to 0 (an empty save), or a '
-      + '`DELETE .../sessions/<id>`. The timestamp tells you when and the line '
-      + 'tells you it happened.');
+    console.log('What to look for:');
+    console.log('  - POST .../patients/<pid>/sessions  — a session WAS created '
+      + 'for this patient (note the time). If there is NO such line in range, '
+      + 'the treatment was never saved to the server at all.');
+    console.log('  - PUT .../sessions/<id>/marks with a tiny response size — '
+      + 'an empty save that wiped the marks.');
+    console.log('  - DELETE .../sessions/<id>  — the session was deleted.');
   }
 }
 
@@ -135,7 +141,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const showMarks = process.argv.includes('--marks');
   const scanPm2 = process.argv.includes('--logs');
   const llArg = process.argv.indexOf('--log-lines');
-  const logLines = llArg >= 0 ? Math.max(100, +process.argv[llArg + 1]) : 8000;
+  const logLines = llArg >= 0 ? Math.max(100, +process.argv[llArg + 1]) : 50000;
   const appArg = process.argv.indexOf('--app');
   const appFilter = appArg >= 0 ? process.argv[appArg + 1] : null;
   if (!code) {
@@ -169,6 +175,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     console.log('');
 
     const sessionIds = [];
+    const patientIds = patients.map((p) => p.id);
     for (const p of patients) {
       const state = p.deleted_at ? `DELETED ${p.deleted_at}` : 'active';
       console.log(`── patient id ${p.id}  "${p.full_name}"  [${state}]`);
@@ -176,6 +183,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
       const { rows: sessions } = await query(
         `SELECT s.id, s.session_date, s.created_at, s.created_by_name, s.label,
+                s.deleted_at, s.deleted_by_name, s.deleted_by_role,
                 COUNT(m.id)::int AS mark_count,
                 MAX(m.created_at) AS last_mark_at
            FROM treatment_sessions s
@@ -195,10 +203,15 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       for (const s of sessions) {
         sessionIds.push(s.id);
         const flag = s.mark_count === 0 ? '  <-- 0 MARKS (likely wiped by an empty save)' : '';
+        const del = s.deleted_at
+          ? `\n       DELETED ${s.deleted_at} by ${s.deleted_by_name || '?'}`
+            + ` (${s.deleted_by_role || '?'}) — restore with: `
+            + `node scripts/restore-session.js ${s.id} --apply`
+          : '';
         console.log(`     session #${s.id}  ${s.session_date}  `
           + `${s.mark_count} marks  by ${s.created_by_name || '-'}  `
           + `created ${s.created_at}`
-          + (s.last_mark_at ? `  last mark ${s.last_mark_at}` : '') + flag);
+          + (s.last_mark_at ? `  last mark ${s.last_mark_at}` : '') + flag + del);
 
         if (showMarks && s.mark_count > 0) {
           const { rows: marks } = await query(
@@ -229,7 +242,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (scanPm2) {
       console.log('');
       console.log('════ pm2 logs ════');
-      scanLogs(sessionIds, code, { lines: logLines, appFilter });
+      scanLogs(sessionIds, patientIds, code, { lines: logLines, appFilter });
     } else {
       console.log('');
       console.log('Add --logs to scan the pm2 request logs for these sessions.');

@@ -27,6 +27,7 @@ const multer  = require('multer');
 const crypto  = require('crypto');
 const { query } = require('../db/pool');
 const { authRequired } = require('../middleware/auth');
+const bin = require('../utils/recycleBin');
 const D = require('../utils/drive');
 const docCategories = require('../utils/docCategories');
 
@@ -1147,13 +1148,17 @@ router.delete('/:id(\\d+)', async (req, res) => {
     }
 
     if (purge) {
-      if (doc.filename) {
-        try { fs.unlinkSync(path.join(DOCS_DIR, doc.filename)); } catch {}
-      }
+      // Row archived by the recycle-bin trigger; the local file goes to the
+      // trash rather than being erased, so a purge can still be undone.
       await query('DELETE FROM patient_documents WHERE id=$1', [id]);
+      if (doc.filename) {
+        const moved = bin.trashFile(path.join(DOCS_DIR, doc.filename));
+        if (moved) await bin.annotateLatest('patient_documents', id, { files: [moved] });
+      }
     } else {
       await query(
         'UPDATE patient_documents SET deleted_at = NOW() WHERE id=$1', [id]);
+      if (doc.deleted_at == null) await bin.logSoftDelete('patient_documents', id, doc);
     }
     res.json({ ok: true, purged: purge });
   } catch (e) {
